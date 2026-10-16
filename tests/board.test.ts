@@ -25,9 +25,9 @@ const MEMORY_FILES: Record<string, string> = {
 }
 
 const PANE = {
-  plugin: 'session-board',
+  plugin: 'baton',
   component: 'Pane',
-  requestId: 'session-board',
+  requestId: 'baton',
   viewport: { columns: 160, rows: 40 },
   props: {
     title: '工作看板',
@@ -47,7 +47,7 @@ const HERDR_AGENTS = [
   { agent: 'grok', agent_status: 'idle', pane_id: 'wP:p1', workspace_id: 'wP' },
 ]
 
-const PROJECT_SETTINGS = MAC.home + '/.claude/projects/' + MAC.project + '/session-board.json'
+const PROJECT_SETTINGS = MAC.home + '/.claude/projects/' + MAC.project + '/baton.json'
 
 // lane 狀態檔放在專案的 docs/lanes/status
 const LANES_DIR = ROOT + '/docs/lanes/status'
@@ -59,6 +59,8 @@ function setup(
     handoff?: string
     herdr?: boolean
     projectSettings?: object
+    // 專案覆寫檔放在改名前的 session-board.json
+    legacySettings?: boolean
     progress?: string
     lanes?: Record<string, object>
     memoryFiles?: Record<string, string>
@@ -70,7 +72,7 @@ function setup(
   const os = extra.windows ? WIN : MAC
   // 外掛看到的路徑：一律 / 分隔
   const base = slash(os.root)
-  const settingsFile = slash(os.home) + '/.claude/projects/' + os.project + '/session-board.json'
+  const settingsFile = slash(os.home) + '/.claude/projects/' + os.project + (extra.legacySettings ? '/session-board.json' : '/baton.json')
   const lanesDir = base + '/docs/lanes/status'
   mock.env(on, {
     ...(extra.windows ? { USERPROFILE: WIN.home } : { HOME: MAC.home }),
@@ -331,10 +333,10 @@ test('新 session 的第一個 prompt 附上交接文件，之後的不附', asy
   await $.prompt.submit({ text: '繼續', origin: { kind: 'composer' }, wait: false })
   await $.prompt.submit({ text: '好', origin: { kind: 'composer' }, wait: false })
   expect(calls.contexts[0].length).toBe(1)
-  expect(calls.contexts[0][0]).toContain('session-board 交接機制')
+  expect(calls.contexts[0][0]).toContain('baton 交接機制')
   expect(calls.contexts[0][0]).toContain('下一步：做 RWD')
   expect(calls.contexts[0][0]).toContain('還沒開「任務」分頁')
-  expect(calls.contexts[0][0]).toContain('session-board.json')
+  expect(calls.contexts[0][0]).toContain('baton.json')
   expect(calls.contexts[1]).toEqual([])
 })
 
@@ -441,6 +443,19 @@ test('專案覆寫檔：讀專案自己的文件的「## 交接」一節，交�
   expect(files.get(ROOT + '/docs/PROGRESS.md')).toBe(PROGRESS)
 })
 
+test('沒有 baton.json 時讀改名前的 session-board.json', async ($, on) => {
+  const { calls } = setup(on, {
+    progress: PROGRESS,
+    legacySettings: true,
+    projectSettings: { handoff_path: 'docs/PROGRESS.md', handoff_section: '## 交接' },
+  })
+  await start($)
+  await $.prompt.submit({ text: '繼續', origin: { kind: 'composer' }, wait: false })
+  const brief = calls.contexts[0][0]
+  expect(brief).toContain(ROOT + '/docs/PROGRESS.md')
+  expect(brief).toContain('下一步：效能')
+})
+
 test('使用者在交接指示之前送出的那一輪，不會被當成交接而觸發壓縮', async ($, on) => {
   const { clock, calls } = setup(on)
   await start($)
@@ -514,7 +529,7 @@ test('指揮的 agent 都閒下來後停止查 herdr，再下指令時恢復', a
 })
 
 const BAND = {
-  plugin: 'session-board',
+  plugin: 'baton',
   component: 'AbovePrompt',
   requestId: 'above-prompt',
   viewport: { columns: 160, rows: 40 },
@@ -737,7 +752,7 @@ test('/handoff 不用開看板也能立即交接，交接中再下一次不會�
   expect(calls.toasts).toContain('已經在交接中')
 
   // 引擎實際會在外掛送的訊息前加一段說明
-  await $.turn.start({ turnId: 't1', text: 'The session-board plugin sent a message: ' + calls.submits[0] })
+  await $.turn.start({ turnId: 't1', text: 'The baton plugin sent a message: ' + calls.submits[0] })
   await step($, 't1')
   await $.turn.complete({ turnId: 't1', answer: '已寫好', durationMs: 1000, isAborted: false, usage: null })
   await clock.advance(2000)
@@ -764,7 +779,7 @@ test('macOS：~ 用 HOME 展開，{project} 是專案路徑換成 - 的代號', 
   const brief = calls.contexts[0][0]
   expect(brief).toContain('記憶資料夾：/Users/user/notes/-Users-user-Projects-example-app')
   expect(brief).toContain('交接文件：/Users/user/Projects/example-app/docs/HANDOFF.md')
-  expect(brief).toContain('/Users/user/.claude/projects/-Users-user-Projects-example-app/session-board.json')
+  expect(brief).toContain('/Users/user/.claude/projects/-Users-user-Projects-example-app/baton.json')
 })
 
 test('Windows：USERPROFILE、磁碟代號與反斜線都展開成 / 分隔的路徑', async ($, on) => {
@@ -775,5 +790,5 @@ test('Windows：USERPROFILE、磁碟代號與反斜線都展開成 / 分隔的�
   expect(brief).toContain('交接文件：D:/work/example-app/docs/HANDOFF.md')
   expect(brief).toContain('下一步：做 RWD')
   expect(brief).toContain('記憶資料夾：C:/Users/user/.claude/projects/D--work-example-app/memory')
-  expect(brief).toContain('C:/Users/user/.claude/projects/D--work-example-app/session-board.json')
+  expect(brief).toContain('C:/Users/user/.claude/projects/D--work-example-app/baton.json')
 })

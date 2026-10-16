@@ -1,10 +1,10 @@
-// session-board：側邊工作看板
+// baton：側邊工作看板（原名 session-board）
 // 分頁「任務」（專案設了 tasks_dir 時）：每條 lane 一到兩行＋百分比，點開是 lane 的子頁（步驟、即時畫面、回覆、報告、記憶），可返回原位
 // 分頁「進度／交接」：執行狀態、任務清單、上下文用量、交接文件
 // 分頁「記憶」：本專案的記憶檔，依 layer 分層（使用者／專案／工作線／階段）
 // 底部：提示快取倒數；快取快過期時自動寫交接（狀態檔或交接文件），寫完後觸發壓縮
 
-const PANE = 'session-board'
+const PANE = 'baton'
 
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
@@ -22,7 +22,9 @@ const HERDR_GRACE_MS = 60 * 1000
 const DEFAULT_MEMORY_DIR = '{config}/projects/{project}/memory'
 const DEFAULT_HANDOFF_PATH = 'docs/HANDOFF.md'
 // 每個專案的覆寫檔（不放進專案 repo）：{ handoff_path, handoff_section, compact_path, memory_dir, tasks_dir, tasks_self }
-const PROJECT_SETTINGS = '{config}/projects/{project}/session-board.json'
+const PROJECT_SETTINGS = '{config}/projects/{project}/baton.json'
+// 改名前（session-board）的覆寫檔：沒有 baton.json 時退回讀這個，舊專案不用搬
+const LEGACY_PROJECT_SETTINGS = '{config}/projects/{project}/session-board.json'
 const HANDOFF_PREFIX = '[自動交接]'
 
 // lane 狀態檔（tasks_dir 底下每條 lane 一個 <lane>.json）；順序＝顯示順序，要人處理的在前
@@ -121,6 +123,8 @@ let handoffSetting = DEFAULT_HANDOFF_PATH
 // 專案覆寫檔（PROJECT_SETTINGS）的內容
 let projectSettings = {}
 let projectSettingsFile = ''
+// 兩個覆寫檔的位置（新、舊），任一個被改都重讀
+let projectSettingsWatch = []
 let memoryDir = ''
 let handoffFile = ''
 // 交接文件是專案自己的文件時，只讀、只更新這一節（例如「## 交接」），不整份覆寫
@@ -246,8 +250,12 @@ async function expandPath($, raw) {
 
 async function loadProjectSettings($) {
   projectSettings = {}
-  projectSettingsFile = await expandPath($, PROJECT_SETTINGS)
+  const primary = await expandPath($, PROJECT_SETTINGS)
+  const legacy = await expandPath($, LEGACY_PROJECT_SETTINGS)
+  projectSettingsWatch = [primary, legacy]
+  projectSettingsFile = primary
   try {
+    if (!(await $.fs.exists(primary)) && (await $.fs.exists(legacy))) projectSettingsFile = legacy
     if (!(await $.fs.exists(projectSettingsFile))) return
     const parsed = JSON.parse(await $.fs.read(projectSettingsFile))
     if (parsed && typeof parsed === 'object') projectSettings = parsed
@@ -466,7 +474,8 @@ async function loadCompact($) {
     const st = await $.fs.stat(compactFile)
     const text = await $.fs.read(compactFile)
     // 檔案第一行是標頭，其餘是摘要
-    const m = text.match(/^<!--\s*session-board:\s*(\{.*\})\s*-->\n?([\s\S]*)$/)
+    // 改名前寫的標頭是 session-board
+    const m = text.match(/^<!--\s*(?:baton|session-board):\s*(\{.*\})\s*-->\n?([\s\S]*)$/)
     const meta = m ? JSON.parse(m[1]) : {}
     compactInfo = {
       summary: (m ? m[2] : text).trim(),
@@ -483,7 +492,7 @@ async function saveCompact($) {
   try {
     if (!compactFile) await resolvePaths($)
     const meta = { at: compactInfo.at, tokensBefore: compactInfo.tokensBefore, tokensAfter: compactInfo.tokensAfter }
-    await $.fs.write(compactFile, '<!-- session-board: ' + JSON.stringify(meta) + ' -->\n' + compactInfo.summary + '\n')
+    await $.fs.write(compactFile, '<!-- baton: ' + JSON.stringify(meta) + ' -->\n' + compactInfo.summary + '\n')
   } catch (err) {
     note = '寫入壓縮摘要失敗：' + String(err)
   }
@@ -599,7 +608,7 @@ async function saveHerdr($) {
 // lane 模式的交接：只帶一覽與自己的狀態，細節需要時再讀（不再整節附上交接文件）
 function laneBriefing(now) {
   const lines = [
-    '[session-board] 這個專案用 lane 狀態檔交接：',
+    '[baton] 這個專案用 lane 狀態檔交接：',
     '- 任務狀態：' + tasksDir + '/<lane>.json，一條 lane 一個；你自己的是 ' + selfLane + '.json。格式與更新規則見該資料夾的 README。',
     '- 詳細交接：' + handoffFile + (handoffSection ? ' 的「' + handoffSection + '」一節' : '') + '，需要細節時再讀。',
     '- 記憶：' + memoryDir + '（frontmatter 的 metadata.layer 分成 user／project／workstream／phase）',
@@ -626,7 +635,7 @@ function laneBriefing(now) {
 function briefing(now) {
   if (tasksDir) return laneBriefing(now)
   const lines = [
-    '[session-board] 這個專案使用 session-board 交接機制：',
+    '[baton] 這個專案使用 baton 交接機制：',
     '- 交接文件：' +
       handoffFile +
       (handoffSection ? ' 的「' + handoffSection + '」一節（專案自己的文件，只更新這一節）' : '') +
@@ -959,7 +968,7 @@ export function register(on, options) {
       toolCalls = 0
       currentTool = ''
       // 只認自己送出的交接指示；使用者剛好先送出的那一輪不算
-      // 引擎會在外掛送的訊息前加「The session-board plugin sent a message: 」，所以不能用 startsWith
+      // 引擎會在外掛送的訊息前加「The baton plugin sent a message: 」，所以不能用 startsWith
       if (phase === 'handoff' && !handoffTurnId && String(e.text ?? '').includes(HANDOFF_PREFIX)) handoffTurnId = e.turnId
       $.ui.invalidate('ui.render')
     }
@@ -1067,7 +1076,7 @@ export function register(on, options) {
       if (handoffFile && samePath(path, handoffFile)) await loadHandoff($)
       if (tasksDir && samePath(dir, tasksDir)) await loadLanes($)
       // 改了專案覆寫檔：重新決定路徑並重讀
-      if (projectSettingsFile && samePath(path, projectSettingsFile)) {
+      if (projectSettingsWatch.some((p) => samePath(path, p))) {
         await resolvePaths($)
         await loadMemories($)
         await loadHandoff($)

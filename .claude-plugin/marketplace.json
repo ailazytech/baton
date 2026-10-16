@@ -1,10 +1,10 @@
 {
-  "name": "session-board",
+  "name": "baton",
   "owner": { "name": "ailazytech" },
-  "description": "session-board: a work board plugin for Claude Code",
+  "description": "baton: a work board plugin for Claude Code",
   "plugins": [
     {
-      "name": "session-board",
+      "name": "baton",
       "source": "./",
       "description": "Side-panel work board for Claude Code: auto handoff + compaction before the prompt cache expires, lanes, layered memory"
     }

@@ -6,7 +6,7 @@ This file is for AI agents (Claude Code, Codex, etc.) picking up this repo. User
 
 ## What this is
 
-session-board is a Claude Code hooks plugin (the plugin's `hooks/hooks.json` points at one JS module). It draws a work board in a side pane and, right before the prompt cache expires, automatically runs "write handoff → compact conversation". No build step, no npm dependencies.
+baton is a Claude Code hooks plugin (the plugin's `hooks/hooks.json` points at one JS module). It draws a work board in a side pane and, right before the prompt cache expires, automatically runs "write handoff → compact conversation". No build step, no npm dependencies.
 
 ## Files
 

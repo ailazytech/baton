@@ -6,7 +6,7 @@
 
 ## 這是什麼
 
-session-board 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一個 JS 模組），在側邊畫一個工作看板，並在提示快取過期前自動「寫交接 → 壓縮對話」。沒有 build 步驟、沒有 npm 相依套件。
+baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一個 JS 模組），在側邊畫一個工作看板，並在提示快取過期前自動「寫交接 → 壓縮對話」。沒有 build 步驟、沒有 npm 相依套件。
 
 ## 檔案
 

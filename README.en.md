@@ -1,4 +1,4 @@
-# session-board
+# baton
 
 English ｜ [繁體中文](README.md)
 
@@ -10,16 +10,26 @@ A side-panel work board for Claude Code (a hooks plugin). It **writes a handoff 
 
 ## What it solves
 
-- **Cache expiry is expensive**: once the 1-hour prompt cache expires, the next turn re-processes everything. With 5 minutes left, session-board asks Claude to write a handoff document, then compacts automatically. The next turn picks up from the handoff.
-- **New sessions forget**: the first prompt of a new session (or after compaction) automatically gets the handoff document attached.
-- **Too many parallel threads to track**: each lane is one JSON status file. The board puts "waiting on you", "failed" and "needs review" first; open a lane to see its live screen, send keys, or reply directly.
+Long-running work in Claude Code (an afternoon-long refactor, several agents running separate workstreams) tends to hit the same walls:
+
+- **Step away and the cache is gone**: the prompt cache lasts an hour by default. Come back from a meeting or lunch and the next turn re-processes the whole conversation — slow and expensive, and worse the longer the conversation.
+- **Forced compaction loses your place**: auto-compaction happens at the worst time, and the summary may drop what you care about (the next step, the decision still waiting on you).
+- **A new session starts from zero**: you paste the handoff back yourself, or spend several turns re-explaining context.
+- **Parallel lanes, no idea who's waiting on you**: one agent is stuck on a permission dialog, another finished and needs review, a third failed — and you're switching pane by pane to find out.
+
+What baton does:
+
+- **Hands off proactively with 5 minutes of cache left**: Claude writes the goal, progress, next step and open decisions into a handoff document, then the conversation is compacted. The handoff turn runs while the cache is still warm, so it's cheap; work continues from a clean context.
+- **Restores context automatically**: the first prompt of a new session (or after compaction) gets the handoff attached — no pasting.
+- **One panel for every lane**: each lane is a JSON status file. "Waiting on you", "failed" and "needs review" come first with notifications; open a lane to see its live screen, send keys, or reply without switching panes.
+- **Layered memory**: user preferences, project facts, lane-specific details and short-lived phase notes are kept apart, and stale ones are flagged for review.
 
 ## Quick start
 
 ```bash
 claude update                                          # make sure you're on 2.1.287+
-claude plugin marketplace add ailazytech/session-board   # or a local path
-claude plugin install session-board@session-board
+claude plugin marketplace add ailazytech/baton   # or a local path
+claude plugin install baton@baton
 ```
 
 Open a new session and type `/board`.
@@ -71,7 +81,7 @@ Paths may use `{config}` (`~/.claude` or `CLAUDE_CONFIG_DIR`), `{project}` (proj
 
 ### Per-project overrides
 
-Put overrides in `{config}/projects/{project}/session-board.json` (outside the project repo). Changes are picked up on save:
+Put overrides in `{config}/projects/{project}/baton.json` (outside the project repo). Changes are picked up on save. If there's no `baton.json`, the pre-rename `session-board.json` is read instead:
 
 ```json
 {
@@ -150,8 +160,8 @@ Run `claude plugin test` when done and report only after everything passes. If b
 **Set up the Tasks tab in your own project**
 
 ```text
-I want to use session-board's Tasks tab for the parallel work in this project.
-Set tasks_dir in ~/.claude/projects/<project slug>/session-board.json to <folder>,
+I want to use baton's Tasks tab for the parallel work in this project.
+Set tasks_dir in ~/.claude/projects/<project slug>/baton.json to <folder>,
 write a README in that folder describing the lane status file format and update rules,
 then create a <lane>.json for each piece of ongoing work. The lead's own file is architect.json.
 ```
@@ -177,9 +187,9 @@ Paths are normalized to `/` internally; both platforms run the same code.
 | `{project}` slug | `/Users/<name>/Projects/app` → `-Users-<name>-Projects-app` | `D:\work\app` → `D--work-app` |
 | Case sensitivity | APFS is case-insensitive by default (the plugin compares paths case-insensitively) | NTFS is case-insensitive |
 
-- **Use relative paths in project settings**: `handoff_path`, `tasks_dir`, `compact_path` in `session-board.json`, and `report`, `spec` in lane files, relative to the project root, work on both
+- **Use relative paths in project settings**: `handoff_path`, `tasks_dir`, `compact_path` in `baton.json`, and `report`, `spec` in lane files, relative to the project root, work on both
 - **If you need absolute paths**: `~/...` on macOS; `/`-separated on Windows (`D:/notes`). Backslashes in JSON must be escaped (`D:\\notes`), so `/` is less error-prone
-- **Moving to another machine**: the `{project}` slug follows the project path. Copy `session-board.json` and `memory/` from `{config}/projects/<old slug>/` to the new slug's folder, or the Memory tab will be empty and overrides won't apply
+- **Moving to another machine**: the `{project}` slug follows the project path. Copy `baton.json` and `memory/` from `{config}/projects/<old slug>/` to the new slug's folder, or the Memory tab will be empty and overrides won't apply
 - **Different config folder**: `CLAUDE_CONFIG_DIR` changes `{config}` on both platforms
 - **Line endings**: CRLF is handled; no conversion needed
 

@@ -1,4 +1,4 @@
-# session-board
+# baton
 
 [English](README.en.md) ｜ 繁體中文
 
@@ -8,16 +8,26 @@ Claude Code 的側邊工作看板（hooks 外掛）。在提示快取過期前**
 
 ## 它解決什麼問題
 
-- **快取過期很貴**：1 小時的提示快取一過期，下一輪要整份重算。session-board 在剩 5 分鐘時叫 Claude 寫好交接文件，接著自動壓縮，下一輪從交接文件接續。
-- **換 session 會失憶**：新 session 或壓縮後的第一個 prompt，自動把交接文件附給 Claude。
-- **多條線並行看不過來**：一條 lane 一個 JSON 狀態檔，看板把「等你」「失敗」「待審」排最前面，點進去可以看即時畫面、送按鍵、直接回覆。
+用 Claude Code 做長時間的工作（一整個下午的重構、同時派好幾個 agent 跑不同的線），通常會卡在這幾件事：
+
+- **離開一下回來，快取就過期了**：提示快取預設 1 小時。開會、吃飯回來，下一輪要把整段對話重新算一次，又慢又花錢；對話越長越痛。
+- **上下文滿了被迫壓縮，壓完不知道做到哪**：自動壓縮發生在最不方便的時候，摘要也不一定留住你在意的細節（下一步是什麼、哪個決定還在等你）。
+- **開新 session 等於失憶**：要自己把交接文件貼回去，或花好幾輪重新解釋背景。
+- **多條線同時跑，不知道誰在等你**：好幾個 agent 各跑一條線，有的卡在權限對話框、有的做完等驗收、有的失敗了，你得一個一個 pane 切過去看。
+
+baton 的做法：
+
+- **快取剩 5 分鐘時主動交接**：叫 Claude 先把目標、進度、下一步、待決定的事寫進交接文件，再自動壓縮。交接趁快取還沒過期時做，這一輪本身很便宜；之後從乾淨的上下文接續。
+- **新 session／壓縮後自動補上下文**：第一個 prompt 自動附上交接文件，不用自己貼。
+- **一個面板看所有工作線**：每條 lane 一個 JSON 狀態檔，「等你」「失敗」「待審」排最前面並跳通知；點進去看即時畫面、送按鍵、直接回覆，不用切 pane。
+- **記憶分層**：使用者偏好、專案事實、某條線的細節、會過期的階段資訊分開放，過期的會提醒你檢查。
 
 ## 快速開始
 
 ```bash
 claude update                                          # 確認 2.1.287 以上
-claude plugin marketplace add ailazytech/session-board   # 或本機路徑
-claude plugin install session-board@session-board
+claude plugin marketplace add ailazytech/baton   # 或本機路徑
+claude plugin install baton@baton
 ```
 
 開新的 session，輸入 `/board`。
@@ -69,7 +79,7 @@ claude plugin install session-board@session-board
 
 ### 個別專案覆寫
 
-在 `{config}/projects/{project}/session-board.json`（不放進專案 repo）覆寫這個專案的設定，存檔後自動重讀：
+在 `{config}/projects/{project}/baton.json`（不放進專案 repo）覆寫這個專案的設定，存檔後自動重讀。沒有 `baton.json` 時，會讀改名前的 `session-board.json`：
 
 ```json
 {
@@ -148,8 +158,8 @@ metadata:
 **在自己的專案開「任務」分頁**
 
 ```text
-我想用 session-board 的任務分頁管理這個專案的並行工作。
-請在 ~/.claude/projects/<專案代號>/session-board.json 設定 tasks_dir 指向 <資料夾>，
+我想用 baton 的任務分頁管理這個專案的並行工作。
+請在 ~/.claude/projects/<專案代號>/baton.json 設定 tasks_dir 指向 <資料夾>，
 在那個資料夾建一份 README 寫清楚 lane 狀態檔的格式與更新規則，
 再為目前進行中的工作各建一個 <lane>.json，主控自己的叫 architect.json。
 ```
@@ -175,9 +185,9 @@ metadata:
 | `{project}` 代號 | `/Users/<名稱>/Projects/app` → `-Users-<名稱>-Projects-app` | `D:\work\app` → `D--work-app` |
 | 檔名大小寫 | APFS 預設不分（外掛比對路徑時不分大小寫） | NTFS 不分 |
 
-- **專案設定寫相對路徑**：`session-board.json` 裡的 `handoff_path`、`tasks_dir`、`compact_path`，以及 lane 狀態檔的 `report`、`spec`，都寫相對於專案根目錄的路徑，兩邊都能用
+- **專案設定寫相對路徑**：`baton.json` 裡的 `handoff_path`、`tasks_dir`、`compact_path`，以及 lane 狀態檔的 `report`、`spec`，都寫相對於專案根目錄的路徑，兩邊都能用
 - **要寫絕對路徑時**：macOS 用 `~/...`；Windows 用 `/` 分隔（`D:/notes`）。JSON 裡的反斜線要跳脫成 `D:\\notes`，用 `/` 比較不會出錯
-- **換電腦時搬專案資料**：`{project}` 代號跟著專案路徑變。舊電腦 `{config}/projects/<舊代號>/` 底下的 `session-board.json` 和 `memory/` 要複製到新代號的資料夾，否則記憶分頁是空的、專案覆寫也不會生效
+- **換電腦時搬專案資料**：`{project}` 代號跟著專案路徑變。舊電腦 `{config}/projects/<舊代號>/` 底下的 `baton.json` 和 `memory/` 要複製到新代號的資料夾，否則記憶分頁是空的、專案覆寫也不會生效
 - **換設定資料夾**：兩邊都可以用 `CLAUDE_CONFIG_DIR` 改 `{config}`
 - **換行字元**：CRLF 讀得懂，不用轉
 

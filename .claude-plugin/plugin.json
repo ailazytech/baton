@@ -1,10 +1,10 @@
 {
-  "name": "session-board",
-  "version": "0.4.1",
+  "name": "baton",
+  "version": "0.5.0",
   "description": "側邊工作看板：lane 任務一覽與子頁、分層記憶、提示快取倒數，快取將過期時自動交接並壓縮",
   "author": { "name": "ailazytech" },
   "license": "MIT",
-  "repository": "https://github.com/ailazytech/session-board",
+  "repository": "https://github.com/ailazytech/baton",
   "userConfig": {
     "memory_dir": {
       "type": "string",
@@ -15,7 +15,7 @@
     "handoff_path": {
       "type": "string",
       "title": "交接文件",
-      "description": "自動交接寫入、進度分頁顯示的檔案。可用 {config}、{project}、{root}、~；相對路徑以專案根目錄為準。個別專案可用 {config}/projects/{project}/session-board.json 覆寫（handoff_path、handoff_section、compact_path、memory_dir）",
+      "description": "自動交接寫入、進度分頁顯示的檔案。可用 {config}、{project}、{root}、~；相對路徑以專案根目錄為準。個別專案可用 {config}/projects/{project}/baton.json 覆寫（handoff_path、handoff_section、compact_path、memory_dir）",
       "default": "docs/HANDOFF.md"
     },
     "brief_on_start": {
