@@ -66,6 +66,10 @@ function setup(
     memoryFiles?: Record<string, string>
     // 改用 Windows 的路徑與環境變數（USERPROFILE、磁碟代號、反斜線）
     windows?: boolean
+    // Claude Code 的 language 設定；沒給時是繁體中文，null 是沒設
+    language?: string | null
+    // LANG 環境變數
+    locale?: string
   } = {},
 ) {
   const clock = mock.clock(on, { now: START })
@@ -76,6 +80,7 @@ function setup(
   const lanesDir = base + '/docs/lanes/status'
   mock.env(on, {
     ...(extra.windows ? { USERPROFILE: WIN.home } : { HOME: MAC.home }),
+    ...(extra.locale ? { LANG: extra.locale } : {}),
     ...(extra.herdr ? { HERDR_ENV: '1', HERDR_BIN_PATH: HERDR_BIN, HERDR_PANE_ID: 'w9:p7', HERDR_WORKSPACE_ID: 'w9' } : {}),
   })
   const memoryFiles = extra.memoryFiles ?? MEMORY_FILES
@@ -124,6 +129,8 @@ function setup(
     saved.set(e.key, e.value)
     return { value: undefined }
   })
+  const language = extra.language === undefined ? '繁體中文台灣用語' : extra.language
+  on('settings.read', () => ({ value: language === null ? {} : { language } }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.root', () => ({ value: os.root }))
   on('session.model', () => ({ value: 'opusplan' }))
@@ -172,7 +179,7 @@ function setup(
   })
   on('session.start', () => ({ cwd: os.root }))
   on('prompt.submit', ($: any, e: any) => {
-    if (e.text.startsWith("[自動交接]")) calls.submits.push(e.text)
+    if (e.text.startsWith("[自動交接]") || e.text.startsWith("[auto-handoff]")) calls.submits.push(e.text)
     else calls.contexts.push([...(e.context ?? [])])
     return { text: e.text }
   })
@@ -791,4 +798,56 @@ test('Windows：USERPROFILE、磁碟代號與反斜線都展開成 / 分隔的�
   expect(brief).toContain('下一步：做 RWD')
   expect(brief).toContain('記憶資料夾：C:/Users/user/.claude/projects/D--work-example-app/memory')
   expect(brief).toContain('C:/Users/user/.claude/projects/D--work-example-app/baton.json')
+})
+
+test('英文：Claude Code 的 language 設成英文時，看板、說明與交接指示都用英文', async ($, on) => {
+  const { clock, calls } = setup(on, { language: 'English', handoff: '# Handoff\nNext: RWD' })
+  await start($)
+  await $.command.run({ command: 'board', args: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ key: 'handoff-now' })).props.label).toBe('Hand off now')
+  expect((await ui.find({ key: 'toggle-auto' })).props.label).toBe('Auto-handoff')
+  expect((await ui.find({ key: 'tab-progress' })).props.label).toBe('Progress')
+  await ui.unmount()
+
+  await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false })
+  expect(calls.contexts[0][0]).toContain('This project uses the baton handoff mechanism')
+  expect(calls.contexts[0][0]).toContain('Next: RWD')
+
+  await $.turn.start({ turnId: 't1', text: 'go on' })
+  await step($, 't1')
+  await $.turn.complete({ turnId: 't1', answer: 'ok', durationMs: 1000, isAborted: false, usage: null })
+  await clock.advance(55 * 60 * 1000 + 1000)
+  expect(calls.submits.length).toBe(1)
+  expect(calls.submits[0].startsWith('[auto-handoff] ')).toBe(true)
+  expect(calls.submits[0]).toContain(ROOT + '/docs/HANDOFF.md')
+
+  // 英文的交接指示也認得出是交接那一輪，結束後壓縮
+  await $.turn.start({ turnId: 't2', text: 'The baton plugin sent a message: ' + calls.submits[0] })
+  await step($, 't2')
+  await $.turn.complete({ turnId: 't2', answer: 'done', durationMs: 1000, isAborted: false, usage: null })
+  await clock.advance(2000)
+  expect(calls.compacts.length).toBe(1)
+  expect(calls.compacts[0]).toContain('continue from the handoff document')
+})
+
+test('沒設 language 時看 LANG：zh_TW 用中文', async ($, on) => {
+  const zh = setup(on, { language: null, locale: 'zh_TW.UTF-8' })
+  await start($)
+  await $.prompt.submit({ text: '繼續', origin: { kind: 'composer' }, wait: false })
+  expect(zh.calls.contexts[0][0]).toContain('baton 交接機制')
+})
+
+test('沒設 language 也沒有 LANG 時用英文', async ($, on) => {
+  const { calls } = setup(on, { language: null })
+  await start($)
+  await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false })
+  expect(calls.contexts[0][0]).toContain('baton handoff mechanism')
+})
+
+test('/config 的 language 優先於 Claude Code 的設定', { options: { language: 'en' } }, async ($, on) => {
+  const { calls } = setup(on)
+  await start($)
+  await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false })
+  expect(calls.contexts[0][0]).toContain('baton handoff mechanism')
 })

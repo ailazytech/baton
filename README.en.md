@@ -6,13 +6,13 @@ A side-panel work board for Claude Code (a hooks plugin). It **writes a handoff 
 
 > Requires Claude Code **2.1.287 or later** (tested on 2.1.288). macOS and Windows share the same code.
 
-> The UI text is currently Traditional Chinese. Labels are translated in parentheses below.
+> The board, handoff instructions and briefings follow the user's language (Traditional Chinese and English for now); see `language` under Configuration.
 
 ## What it solves
 
 Long-running work in Claude Code (an afternoon-long refactor, several agents running separate workstreams) tends to hit the same walls:
 
-- **Step away and the cache is gone**: the prompt cache lasts an hour by default. Come back from a meeting or lunch and the next turn re-processes the whole conversation — slow and expensive, and worse the longer the conversation.
+- **Step away and the cache is gone**: the prompt cache lasts an hour by default. Come back from a meeting or lunch and the next turn re-processes the whole conversation — slow and expensive, and the longer the conversation, the more tokens it burns.
 - **Forced compaction loses your place**: auto-compaction happens at the worst time, and the summary may drop what you care about (the next step, the decision still waiting on you).
 - **A new session starts from zero**: you paste the handoff back yourself, or spend several turns re-explaining context.
 - **Parallel lanes, no idea who's waiting on you**: one agent is stuck on a permission dialog, another finished and needs review, a third failed — and you're switching pane by pane to find out.
@@ -36,7 +36,7 @@ Open a new session and type `/board`.
 
 - `/board`: toggle the board. **Only sessions that have run `/board` get automatic handoff** (they become the lead session).
 - `/handoff`: hand off now without opening the board. Use this when the mouse can't reach the board buttons (non-fullscreen layout).
-- While the board is closed, a "◧ 工作看板" (work board) button appears at the top right of the prompt box (disable with `launcher_button` in `/config`).
+- While the board is closed, a "◧ Work board" button appears at the top right of the prompt box (disable with `launcher_button` in `/config`).
 
 Docking on the right requires the fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1`) and a terminal at least 110 columns wide; otherwise the board sits above the prompt box.
 
@@ -44,19 +44,19 @@ Docking on the right requires the fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1`)
 
 ### Tabs
 
-- **任務 (Tasks)** — only when the project sets `tasks_dir` (see "Lane status files"): one or two lines per lane plus a percentage. Lanes that need you (blocked, failed, review, dialog awaiting confirmation) come first; idle and done lanes are collapsed.
+- **Tasks** — only when the project sets `tasks_dir` (see "Lane status files"): one or two lines per lane plus a percentage. Lanes that need you (blocked, failed, review, dialog awaiting confirmation) come first; idle and done lanes are collapsed.
   - Click a lane to open its page: steps, decisions waiting on you, notes, live screen (`herdr pane read`, refreshed every 3 s), keys (Enter / Esc / 1 / 2 / 3), a reply box (`herdr agent prompt`), the report, and memories for that lane.
-  - The report is one level deeper; "← 返回" (back) walks up one level at a time and restores the list scroll position.
+  - The report is one level deeper; "← Back" walks up one level at a time and restores the list scroll position.
   - Toasts when another lane becomes blocked, review, or failed.
-- **記憶 (Memory)**: grouped by frontmatter `metadata.layer` into user / project / workstream / phase. Workstream memories attach to a lane page via `metadata.lane`; phase memories past `metadata.review_by` are flagged "due for review". Memories without a layer go under "unlayered", grouped by type.
-- **進度 (Progress)** (called **交接 / Handoff** when the Tasks tab exists): run state, todos, context usage, handoff document.
+- **Memory**: grouped by frontmatter `metadata.layer` into user / project / workstream / phase. Workstream memories attach to a lane page via `metadata.lane`; phase memories past `metadata.review_by` are flagged "due for review". Memories without a layer go under "unlayered", grouped by type.
+- **Progress** (called **Handoff** when the Tasks tab exists): run state, todos, context usage, handoff document.
 - **Herdr** — only inside herdr and when there is no Tasks tab: agents/panes this session has commanded through herdr and their live state; toasts on blocked or done.
 - **Footer**: current model, cache countdown, auto-handoff toggle.
 
 ### Auto-handoff flow
 
 1. Every request from the lead session restarts the cache timer.
-2. With 5 minutes left, and when all of the following hold, the plugin sends an instruction starting with `[自動交接]` asking Claude to update the handoff document (or its own lane status file) and memory:
+2. With 5 minutes left, and when all of the following hold, the plugin sends an instruction starting with `[auto-handoff]` (`[自動交接]` in the Chinese UI) asking Claude to update the handoff document (or its own lane status file) and memory:
    - this session has run `/board` and auto-handoff is on
    - `cache_ttl` is `1h` (no auto-handoff with a 5-minute cache — it would interrupt constantly)
    - context usage is at least 20% (otherwise compaction isn't worth it)
@@ -76,6 +76,7 @@ In `/config`:
 | `launcher_button` | Board button above the prompt box | on |
 | `cache_ttl` | Prompt cache TTL, `1h` / `5m`; the value reported by the engine on model switch wins | `1h` |
 | `away_hours` | Stop auto-handoff after this many hours without input (`24` / `8` / `2`) | `24` |
+| `language` | UI language, `auto` / `zh-TW` / `en`. `auto` uses Claude Code's `language` setting, else `LANG`; any Chinese maps to Traditional Chinese, anything else to English | `auto` |
 
 Paths may use `{config}` (`~/.claude` or `CLAUDE_CONFIG_DIR`), `{project}` (project slug), `{root}` (project root), and `~`. Relative paths resolve against the project root.
 

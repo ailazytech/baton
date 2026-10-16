@@ -25,17 +25,17 @@ const DEFAULT_HANDOFF_PATH = 'docs/HANDOFF.md'
 const PROJECT_SETTINGS = '{config}/projects/{project}/baton.json'
 // 改名前（session-board）的覆寫檔：沒有 baton.json 時退回讀這個，舊專案不用搬
 const LEGACY_PROJECT_SETTINGS = '{config}/projects/{project}/session-board.json'
-const HANDOFF_PREFIX = '[自動交接]'
 
 // lane 狀態檔（tasks_dir 底下每條 lane 一個 <lane>.json）；順序＝顯示順序，要人處理的在前
 const LANE_ORDER = ['blocked', 'failed', 'review', 'working', 'idle', 'done']
+// 圖示與顏色；文字在 I18N 的 laneStates
 const LANE_LOOK = {
-  blocked: ['⚠', 'red', '等你'],
-  failed: ['✖', 'red', '失敗'],
-  review: ['✔', 'yellow', '待審'],
-  working: ['◐', 'green', '進行中'],
-  idle: ['○', undefined, '待命'],
-  done: ['✓', undefined, '完成'],
+  blocked: ['⚠', 'red'],
+  failed: ['✖', 'red'],
+  review: ['✔', 'yellow'],
+  working: ['◐', 'green'],
+  idle: ['○', undefined],
+  done: ['✓', undefined],
 }
 const STEP_ICONS = { done: '✔', doing: '◐', todo: '○', skip: '–' }
 // 進行中的 lane 這麼久沒更新狀態檔，就提示可能停住了
@@ -52,21 +52,381 @@ const LANE_KEYS = [
   ['3', '3'],
 ]
 
-// 記憶分層（frontmatter 的 metadata.layer）；沒標的歸「未分層」
-const LAYERS = [
-  ['user', '使用者', '你的偏好與做法，每次都帶'],
-  ['project', '專案', '長期不變的事實與決定'],
-  ['workstream', '工作線', '跟著某條 lane'],
-  ['phase', '階段', '目前這一段，會過期'],
-]
+// 記憶分層（frontmatter 的 metadata.layer）；沒標的歸「未分層」。文字在 I18N 的 layers
+const LAYERS = ['user', 'project', 'workstream', 'phase']
+// 沒分層的記憶依 metadata.type 分組；文字在 I18N 的 types
+const MEMORY_TYPES = ['feedback', 'user', 'project', 'reference']
 
+// 介面、交接指示與給 Claude 的說明都跟著使用者語言（/config 的 language；auto 依 Claude Code 的 language 設定或 LANG）
+const I18N = {
+  'zh-TW': {
+    handoffPrefix: '[自動交接]',
+    paneTitle: '工作看板',
+    launcher: '◧ 工作看板',
+    cmdBoard: '開關工作看板（進度／記憶／快取倒數）',
+    cmdHandoff: '立即交接：寫交接文件後壓縮對話（等同看板的「立即交接」）',
+    registerFail: (name, err) => '註冊 /' + name + ' 失敗：' + err,
+    laneStates: { blocked: '等你', failed: '失敗', review: '待審', working: '進行中', idle: '待命', done: '完成' },
+    layers: {
+      user: ['使用者', '你的偏好與做法，每次都帶'],
+      project: ['專案', '長期不變的事實與決定'],
+      workstream: ['工作線', '跟著某條 lane'],
+      phase: ['階段', '目前這一段，會過期'],
+      none: ['未分層', '還沒標 layer'],
+    },
+    types: { feedback: '叮囑', user: '關於你', project: '專案', reference: '參考', other: '其他' },
+    herdrActions: {
+      prompt: '派工作',
+      'send-keys': '送按鍵',
+      read: '讀輸出',
+      wait: '等待',
+      focus: '切換焦點',
+      start: '啟動 agent',
+      split: '分割出新 pane',
+      run: '執行指令',
+      'send-text': '送文字',
+      close: '關閉',
+    },
+    // 時間
+    justNow: '剛剛',
+    minutesAgo: (n) => n + ' 分鐘前',
+    hoursAgo: (n) => n + ' 小時前',
+    // lane
+    dialogWaiting: '對話框等確認',
+    waitingOn: (needs) => '等你：' + needs,
+    failed: (detail) => '失敗' + (detail ? '：' + detail : ''),
+    failedAt: (step) => '失敗於 ' + step,
+    reviewDone: '做完待審',
+    running: (d) => '● 執行中 ' + d,
+    stale: (ago) => ago + '沒更新',
+    idle: '待命',
+    accepted: '已驗收',
+    noTasksDir: '找不到任務資料夾',
+    unreadable: (names) => '讀不懂：' + names.join('、'),
+    lanesReadFail: (err) => '讀取任務失敗：' + err,
+    toastBlocked: (lane, needs) => lane + ' 等你：' + needs,
+    toastReview: (lane) => lane + ' 做完了，等驗收',
+    toastFailed: (lane) => lane + ' 失敗',
+    screenFail: (err) => '讀不到畫面：' + err,
+    sendFail: (err) => '沒送出：' + err,
+    sentTo: (lane) => '已送給 ' + lane,
+    keyFail: (err) => '按鍵沒送出：' + err,
+    reportMissing: '報告檔不存在',
+    reportFail: (err) => '讀不到報告：' + err,
+    // 檔案
+    settingsReadFail: (err) => '讀取專案設定失敗：' + err,
+    compactWriteFail: (err) => '寫入壓縮摘要失敗：' + err,
+    memoryReadFail: (err) => '讀取記憶失敗：' + err,
+    // herdr
+    herdrReadFail: (err) => '讀取 herdr 失敗：' + err,
+    herdrBlocked: (who) => who + ' 在等待確認',
+    herdrDone: (who) => who + ' 已完成',
+    // 交接
+    handoffToast: '快取即將過期，開始寫交接文件',
+    handoffSent: '已送出交接指示',
+    handoffBlocked: (why) => '交接指示被擋下：' + why,
+    handoffSubmitFail: (err) => '交接指示送出失敗：' + err,
+    alreadyHandingOff: '已經在交接中',
+    alreadyCompacting: '正在壓縮中',
+    compactSkipped: (why) => '壓縮被略過：' + why,
+    compactDone: '交接完成並已壓縮',
+    compactFail: (err) => '壓縮失敗：' + err,
+    contextTooSmall: (p) => '上下文只有 ' + p + '%，略過自動交接',
+    handoffAborted: '交接那一輪被中斷，本次不壓縮',
+    handoffWritten: '交接文件已寫好，準備壓縮',
+    // 看板：進度
+    runningTools: (d, n) => '● 執行中 ' + d + ' · 本輪工具 ' + n + ' 次',
+    idleState: '○ 閒置',
+    context: (p) => '上下文 ' + p + '%',
+    tasksHeader: (done, total) => '任務 ' + done + '/' + total,
+    lastReply: '上一輪回覆',
+    compactKept: (at) => '壓縮後保留（' + at + '）',
+    handoffDoc: (at) => '交接文件（' + at + '）',
+    onlySection: (s) => ' · 只讀「' + s + '」一節',
+    noHandoff: '尚無交接文件',
+    // 看板：記憶
+    dueReview: ' ⚠ 該檢查了',
+    dueReviewN: (n) => ' ⚠ ' + n + ' 則該檢查了',
+    memoryCount: (n) => n + ' 則記憶',
+    refresh: '重新整理',
+    noMemories: '這個資料夾還沒有記憶。',
+    // 看板：任務
+    back: '← 返回',
+    tasks: '任務',
+    noLanes: '還沒有 lane 狀態檔。',
+    needsYou: (n) => '需要處理 ' + n,
+    working: (n) => '進行中 ' + n,
+    quiet: (idle, done) => '待命 ' + idle + ' · 已完成 ' + done,
+    otherAgents: (n) => '其他 agent（沒有狀態檔）' + n,
+    updated: (ago) => '更新 ' + ago,
+    spec: '規格 ',
+    decide: '等你決定',
+    notes: '備註',
+    liveScreen: '即時畫面',
+    loading: '讀取中…',
+    less: '少一點',
+    more: '多一點',
+    keys: '按鍵',
+    dialogPlaceholder: '對話框在等確認，先用上面的按鍵',
+    replyPlaceholder: (lane) => '回覆 ' + lane + '…',
+    send: '送出',
+    report: '報告',
+    laneMemories: (n) => '這條線的記憶（' + n + '）',
+    laneGone: '這條 lane 的狀態檔不見了。',
+    // 看板：Herdr
+    notAgent: '已結束或不是 agent pane',
+    thisPane: (id) => '本 pane ' + id,
+    commanded: (n) => '這個 session 指揮的（' + n + '）',
+    noCommanded: '還沒有透過 herdr 指揮其他 pane。',
+    lastAction: (action, detail, ago) => '最後：' + action + (detail ? '「' + detail + '」' : '') + ' · ' + ago,
+    sameWorkspace: (n) => '同工作區的其他 agent（' + n + '）',
+    // 看板：底部
+    cache: '快取',
+    cacheNotYet: '尚未建立',
+    cacheExpired: (d) => '已過期 ' + d + ' 前',
+    handingOff: '交接中…',
+    compacting: '壓縮中…',
+    ttlNoAuto: (ttl) => '快取 ' + ttl + '，不自動交接',
+    standby: '待命',
+    doneWaiting: '已完成，等新指示',
+    model: (m) => '模型 ' + m,
+    autoHandoff: '自動交接',
+    handoffNow: '立即交接',
+    // 分頁
+    tabMemory: (n) => '記憶 (' + n + ')',
+    tabHandoff: '交接',
+    tabProgress: '進度',
+    wrap: '換行',
+    count: (label, n) => label + '（' + n + '）',
+    // 給 Claude 的說明（使用者看不到）
+    laneBriefing: (c) => [
+      '[baton] 這個專案用 lane 狀態檔交接：',
+      '- 任務狀態：' + c.tasksDir + '/<lane>.json，一條 lane 一個；你自己的是 ' + c.selfLane + '.json。格式與更新規則見該資料夾的 README。',
+      '- 詳細交接：' + c.handoffFile + (c.handoffSection ? ' 的「' + c.handoffSection + '」一節' : '') + '，需要細節時再讀。',
+      '- 記憶：' + c.memoryDir + '（frontmatter 的 metadata.layer 分成 user／project／workstream／phase）',
+      '- 主控 session 的提示快取快過期時，會要求你更新自己的狀態檔，接著自動壓縮對話。',
+      '',
+      '任務一覽（若和使用者這次的要求無關，可以忽略）：',
+    ],
+    laneLine: (lane, title, percent, done, total, standing) => lane + '：' + title + ' ' + percent + '%（' + done + '/' + total + '）· ' + standing,
+    laneSelfSteps: (lane) => '你自己的步驟（' + lane + '）：',
+    laneSelfNeeds: (needs) => '等使用者決定：' + needs,
+    briefing: (c) => [
+      '[baton] 這個專案使用 baton 交接機制：',
+      '- 交接文件：' +
+        c.handoffFile +
+        (c.handoffSection ? ' 的「' + c.handoffSection + '」一節（專案自己的文件，只更新這一節）' : '') +
+        (c.handoffAt ? '（最後更新 ' + c.handoffAt + '）' : '（尚未建立）'),
+      '- 壓縮摘要：' + c.compactFile,
+      '- 記憶資料夾：' + c.memoryDir,
+      '- 主控 session 的提示快取快過期時，會要求你更新交接文件，接著自動壓縮對話。',
+      '- 這個專案還沒開「任務」分頁。如果工作有多條並行的線（派工給 herdr、有待派工清單、交接裡同時好幾項進行中），找適當時機問使用者要不要建立；不要自己建。',
+      '  建法：在 ' +
+        c.projectSettingsFile +
+        ' 寫 {"tasks_dir": "<資料夾>"}，資料夾裡每條 lane 一個 <lane>.json：lane、title（一行）、state（blocked／failed／review／working／idle／done）、steps（{ id, title, state: todo|doing|done|skip }）、updated，選填 needs、pane、spec、head、report、notes；主控自己那條叫 ' +
+        c.selfLane +
+        '.json。',
+    ],
+    briefingHandoff: '以下是目前的交接文件，請據此接續先前的工作；若和使用者這次的要求無關，可以忽略。',
+    handoffHead: (min) => '提示快取約 ' + min + ' 分鐘後過期，接下來會自動壓縮對話。請立刻：',
+    handoffLane: (c) => [
+      '1. 覆寫你自己的狀態檔 `' + c.tasksDir + '/' + c.selfLane + '.json`：steps 的狀態照實更新；要使用者決定的事寫 needs；接手需要知道、但不屬於任何步驟的事寫 notes（最多 8 則，一行一則）。依該資料夾 README 的規則驗證，並更新它說要產生的總覽。',
+      '2. 你驗收過或確認過狀態改變的 lane，也更新它們的狀態檔。',
+      '3. 若有值得長期保存的使用者叮囑或專案事實，順手更新記憶（`' + c.memoryDir + '`，標上 metadata.layer）。',
+      '4. 不要開始新的工作。寫完用一兩句回報即可。',
+    ],
+    handoffDocSteps: (c) => [
+      (c.handoffSection
+        ? '1. 更新 `' + c.handoffFile + '` 中目前的「' + c.handoffSection + '」那一節（這是專案自己的文件：依它既有的格式與慣例更新，不要整份覆寫、不要動其他章節）：'
+        : '1. 把目前的處理進度寫進 `' + c.handoffFile + '`（整份覆寫、精簡）：') + '目標、已完成、進行中、下一步、關鍵檔案與決策、待使用者確認的問題。',
+      '2. 若有值得長期保存的使用者叮囑或專案事實，順手更新記憶（`' + c.memoryDir + '`）。',
+      '3. 不要開始新的工作。寫完用一兩句回報即可。',
+    ],
+    compactLane: (dir) => '保留 ' + dir + ' 的 lane 狀態檔所指的進度、等待使用者決定的事與下一步；壓縮後以狀態檔為準繼續工作。',
+    compactDoc: (file, section) => '保留 ' + file + (section ? ' 的「' + section + '」一節' : '') + ' 的重點、目前任務狀態與下一步；壓縮後以交接文件為準繼續工作。',
+  },
+  en: {
+    handoffPrefix: '[auto-handoff]',
+    paneTitle: 'Work board',
+    launcher: '◧ Work board',
+    cmdBoard: 'Toggle the work board (progress / memory / cache countdown)',
+    cmdHandoff: 'Hand off now: write the handoff, then compact (same as "Hand off now" on the board)',
+    registerFail: (name, err) => 'Failed to register /' + name + ': ' + err,
+    laneStates: { blocked: 'Waiting on you', failed: 'Failed', review: 'Review', working: 'Working', idle: 'Idle', done: 'Done' },
+    layers: {
+      user: ['User', 'Your preferences and habits, always included'],
+      project: ['Project', 'Long-lived facts and decisions'],
+      workstream: ['Workstream', 'Tied to a lane'],
+      phase: ['Phase', 'The current stretch; expires'],
+      none: ['Unlayered', 'No layer set yet'],
+    },
+    types: { feedback: 'Feedback', user: 'About you', project: 'Project', reference: 'Reference', other: 'Other' },
+    herdrActions: {
+      prompt: 'assigned work',
+      'send-keys': 'sent keys',
+      read: 'read output',
+      wait: 'waited',
+      focus: 'focused',
+      start: 'started agent',
+      split: 'split new pane',
+      run: 'ran command',
+      'send-text': 'sent text',
+      close: 'closed',
+    },
+    justNow: 'just now',
+    minutesAgo: (n) => n + ' min ago',
+    hoursAgo: (n) => n + ' h ago',
+    dialogWaiting: 'Dialog awaiting confirmation',
+    waitingOn: (needs) => 'Waiting on you: ' + needs,
+    failed: (detail) => 'Failed' + (detail ? ': ' + detail : ''),
+    failedAt: (step) => 'Failed at ' + step,
+    reviewDone: 'Done, needs review',
+    running: (d) => '● Running ' + d,
+    stale: (ago) => 'last update ' + ago,
+    idle: 'Idle',
+    accepted: 'Accepted',
+    noTasksDir: 'Tasks folder not found',
+    unreadable: (names) => 'Unreadable: ' + names.join(', '),
+    lanesReadFail: (err) => 'Failed to read lanes: ' + err,
+    toastBlocked: (lane, needs) => lane + ' is waiting on you: ' + needs,
+    toastReview: (lane) => lane + ' is done and needs review',
+    toastFailed: (lane) => lane + ' failed',
+    screenFail: (err) => 'Cannot read screen: ' + err,
+    sendFail: (err) => 'Not sent: ' + err,
+    sentTo: (lane) => 'Sent to ' + lane,
+    keyFail: (err) => 'Key not sent: ' + err,
+    reportMissing: 'Report file not found',
+    reportFail: (err) => 'Cannot read report: ' + err,
+    settingsReadFail: (err) => 'Failed to read project settings: ' + err,
+    compactWriteFail: (err) => 'Failed to write compaction summary: ' + err,
+    memoryReadFail: (err) => 'Failed to read memory: ' + err,
+    herdrReadFail: (err) => 'Failed to read herdr: ' + err,
+    herdrBlocked: (who) => who + ' is waiting for confirmation',
+    herdrDone: (who) => who + ' finished',
+    handoffToast: 'Cache expiring soon, writing handoff',
+    handoffSent: 'Handoff instruction sent',
+    handoffBlocked: (why) => 'Handoff instruction blocked: ' + why,
+    handoffSubmitFail: (err) => 'Failed to send handoff instruction: ' + err,
+    alreadyHandingOff: 'Handoff already in progress',
+    alreadyCompacting: 'Compaction in progress',
+    compactSkipped: (why) => 'Compaction skipped: ' + why,
+    compactDone: 'Handed off and compacted',
+    compactFail: (err) => 'Compaction failed: ' + err,
+    contextTooSmall: (p) => 'Context only ' + p + '%, skipping auto-handoff',
+    handoffAborted: 'Handoff turn was interrupted; not compacting',
+    handoffWritten: 'Handoff written; compacting',
+    runningTools: (d, n) => '● Running ' + d + ' · ' + n + ' tool calls this turn',
+    idleState: '○ Idle',
+    context: (p) => 'Context ' + p + '%',
+    tasksHeader: (done, total) => 'Tasks ' + done + '/' + total,
+    lastReply: 'Last reply',
+    compactKept: (at) => 'Kept after compaction (' + at + ')',
+    handoffDoc: (at) => 'Handoff (' + at + ')',
+    onlySection: (s) => ' · section "' + s + '" only',
+    noHandoff: 'No handoff document yet',
+    dueReview: ' ⚠ due for review',
+    dueReviewN: (n) => ' ⚠ ' + n + ' due for review',
+    memoryCount: (n) => n + (n === 1 ? ' memory' : ' memories'),
+    refresh: 'Refresh',
+    noMemories: 'No memories in this folder yet.',
+    back: '← Back',
+    tasks: 'Tasks',
+    noLanes: 'No lane status files yet.',
+    needsYou: (n) => 'Needs you ' + n,
+    working: (n) => 'Working ' + n,
+    quiet: (idle, done) => 'Idle ' + idle + ' · Done ' + done,
+    otherAgents: (n) => 'Other agents (no status file) ' + n,
+    updated: (ago) => 'updated ' + ago,
+    spec: 'Spec ',
+    decide: 'Decision needed',
+    notes: 'Notes',
+    liveScreen: 'Live screen',
+    loading: 'Loading…',
+    less: 'Less',
+    more: 'More',
+    keys: 'Keys',
+    dialogPlaceholder: 'A dialog is waiting; use the keys above first',
+    replyPlaceholder: (lane) => 'Reply to ' + lane + '…',
+    send: 'Send',
+    report: 'Report',
+    laneMemories: (n) => 'Memories for this lane (' + n + ')',
+    laneGone: "This lane's status file is gone.",
+    notAgent: 'exited or not an agent pane',
+    thisPane: (id) => 'This pane ' + id,
+    commanded: (n) => 'Commanded by this session (' + n + ')',
+    noCommanded: 'No panes commanded through herdr yet.',
+    lastAction: (action, detail, ago) => 'Last: ' + action + (detail ? ' "' + detail + '"' : '') + ' · ' + ago,
+    sameWorkspace: (n) => 'Other agents in this workspace (' + n + ')',
+    cache: 'Cache',
+    cacheNotYet: 'not created',
+    cacheExpired: (d) => 'expired ' + d + ' ago',
+    handingOff: 'Handing off…',
+    compacting: 'Compacting…',
+    ttlNoAuto: (ttl) => 'Cache ' + ttl + ', no auto-handoff',
+    standby: 'Standby',
+    doneWaiting: 'Done, waiting for input',
+    model: (m) => 'Model ' + m,
+    autoHandoff: 'Auto-handoff',
+    handoffNow: 'Hand off now',
+    tabMemory: (n) => 'Memory (' + n + ')',
+    tabHandoff: 'Handoff',
+    tabProgress: 'Progress',
+    wrap: 'Wrap',
+    count: (label, n) => label + ' (' + n + ')',
+    laneBriefing: (c) => [
+      '[baton] This project hands off through lane status files:',
+      '- Lane status: ' + c.tasksDir + '/<lane>.json, one per lane; yours is ' + c.selfLane + '.json. Format and update rules are in that folder\'s README.',
+      '- Detailed handoff: ' + c.handoffFile + (c.handoffSection ? ', section "' + c.handoffSection + '"' : '') + '; read it when you need details.',
+      '- Memory: ' + c.memoryDir + ' (frontmatter metadata.layer: user / project / workstream / phase)',
+      "- When the lead session's prompt cache is about to expire, you'll be asked to update your own status file, then the conversation is compacted automatically.",
+      '',
+      "Lane overview (ignore if unrelated to the user's request):",
+    ],
+    laneLine: (lane, title, percent, done, total, standing) => lane + ': ' + title + ' ' + percent + '% (' + done + '/' + total + ') · ' + standing,
+    laneSelfSteps: (lane) => 'Your steps (' + lane + '):',
+    laneSelfNeeds: (needs) => 'Waiting on the user: ' + needs,
+    briefing: (c) => [
+      '[baton] This project uses the baton handoff mechanism:',
+      '- Handoff document: ' +
+        c.handoffFile +
+        (c.handoffSection ? ', section "' + c.handoffSection + '" (a project document; update only that section)' : '') +
+        (c.handoffAt ? ' (last updated ' + c.handoffAt + ')' : ' (not created yet)'),
+      '- Compaction summary: ' + c.compactFile,
+      '- Memory folder: ' + c.memoryDir,
+      "- When the lead session's prompt cache is about to expire, you'll be asked to update the handoff document, then the conversation is compacted automatically.",
+      "- This project has no Tasks tab yet. If the work has several parallel lines (work dispatched through herdr, a backlog to dispatch, several items in progress in the handoff), ask the user at a suitable moment whether to create one; don't create it yourself.",
+      '  How: write {"tasks_dir": "<folder>"} to ' +
+        c.projectSettingsFile +
+        '; in that folder, one <lane>.json per lane: lane, title (one line), state (blocked / failed / review / working / idle / done), steps ({ id, title, state: todo|doing|done|skip }), updated; optional needs, pane, spec, head, report, notes. The lead\'s own file is ' +
+        c.selfLane +
+        '.json.',
+    ],
+    briefingHandoff: "Below is the current handoff document; continue the earlier work from it. Ignore it if unrelated to the user's request.",
+    handoffHead: (min) => 'The prompt cache expires in about ' + min + ' min, and the conversation will be compacted right after. Now:',
+    handoffLane: (c) => [
+      '1. Overwrite your own status file `' + c.tasksDir + '/' + c.selfLane + '.json`: update step states truthfully; put decisions for the user in needs; put anything the next session must know that is not a step in notes (at most 8, one line each). Validate it per that folder\'s README and update any overview it says to generate.',
+      '2. Also update the status files of lanes you accepted or whose state change you confirmed.',
+      '3. If there are user instructions or project facts worth keeping long-term, update memory (`' + c.memoryDir + '`, with metadata.layer).',
+      "4. Don't start new work. Reply with one or two sentences when done.",
+    ],
+    handoffDocSteps: (c) => [
+      (c.handoffSection
+        ? '1. Update the current "' + c.handoffSection + '" section of `' + c.handoffFile + '` (a project document: follow its existing format and conventions; don\'t rewrite the whole file or touch other sections): '
+        : '1. Write the current progress to `' + c.handoffFile + '` (overwrite the whole file, keep it concise): ') +
+        'goal, done, in progress, next steps, key files and decisions, open questions for the user.',
+      '2. If there are user instructions or project facts worth keeping long-term, update memory (`' + c.memoryDir + '`).',
+      "3. Don't start new work. Reply with one or two sentences when done.",
+    ],
+    compactLane: (dir) => 'Keep the progress, decisions waiting on the user and next steps referenced by the lane status files in ' + dir + '; after compaction, continue from the status files.',
+    compactDoc: (file, section) => 'Keep the key points of ' + file + (section ? ', section "' + section + '"' : '') + ', the current task state and next steps; after compaction, continue from the handoff document.',
+  },
+}
+// 任何語言的交接前綴都認（切換語言前送出的交接指示也要能辨識）
+const HANDOFF_PREFIXES = Object.values(I18N).map((x) => x.handoffPrefix)
 
-const TYPE_LABELS = [
-  ['feedback', '叮囑'],
-  ['user', '關於你'],
-  ['project', '專案'],
-  ['reference', '參考'],
-]
+// 語言：/config 的 language（auto／zh-TW／en），auto 在 session.start 決定
+let languageSetting = 'auto'
+let T = I18N['zh-TW']
 
 // 介面狀態
 let tab = 'progress'
@@ -260,7 +620,7 @@ async function loadProjectSettings($) {
     const parsed = JSON.parse(await $.fs.read(projectSettingsFile))
     if (parsed && typeof parsed === 'object') projectSettings = parsed
   } catch (err) {
-    note = '讀取專案設定失敗：' + String(err)
+    note = T.settingsReadFail(String(err))
   }
 }
 
@@ -303,17 +663,17 @@ function needsAttention(l) {
 // 第二行：在等誰、做到哪
 function laneStanding(l, now) {
   const step = laneStep(l)
-  if (laneDialog(l) && l.state !== 'blocked') return '對話框等確認'
-  if (l.state === 'blocked') return '等你：' + (l.needs ?? '')
-  if (l.state === 'failed') return '失敗' + (l.needs ? '：' + l.needs : step ? '於 ' + step.id + ' ' + step.title : '')
-  if (l.state === 'review') return '做完待審' + (l.head ? ' · HEAD ' + l.head : '')
+  if (laneDialog(l) && l.state !== 'blocked') return T.dialogWaiting
+  if (l.state === 'blocked') return T.waitingOn(l.needs ?? '')
+  if (l.state === 'failed') return l.needs ? T.failed(l.needs) : step ? T.failedAt(step.id + ' ' + step.title) : T.failed('')
+  if (l.state === 'review') return T.reviewDone + (l.head ? ' · HEAD ' + l.head : '')
   if (l.state === 'working') {
-    if (l.lane === selfLane && working) return '● 執行中 ' + duration(now - turnStartedAt) + (step ? ' · ' + step.id + ' ' + step.title : '')
-    const stale = now - Date.parse(l.updated) > STALE_MS ? ' · ' + ago(now - Date.parse(l.updated)) + '沒更新' : ''
+    if (l.lane === selfLane && working) return T.running(duration(now - turnStartedAt)) + (step ? ' · ' + step.id + ' ' + step.title : '')
+    const stale = now - Date.parse(l.updated) > STALE_MS ? ' · ' + T.stale(ago(now - Date.parse(l.updated))) : ''
     return (step ? step.id + ' ' + step.title : '') + stale
   }
-  if (l.state === 'idle') return l.needs || '待命'
-  return '已驗收'
+  if (l.state === 'idle') return l.needs || T.idle
+  return T.accepted
 }
 
 async function loadLanes($) {
@@ -324,7 +684,7 @@ async function loadLanes($) {
   try {
     if (!(await $.fs.exists(tasksDir))) {
       lanes = []
-      lanesError = '找不到任務資料夾'
+      lanesError = T.noTasksDir
       return
     }
     const entries = await $.fs.list(tasksDir)
@@ -333,25 +693,25 @@ async function loadLanes($) {
     for (const f of entries.filter((x) => x.kind === 'file' && x.name.endsWith('.json'))) {
       try {
         const v = JSON.parse(await $.fs.read(tasksDir + '/' + f.name))
-        if (!v || typeof v.lane !== 'string' || typeof v.title !== 'string' || !LANE_ORDER.includes(v.state) || !Array.isArray(v.steps)) throw new Error('格式不符')
+        if (!v || typeof v.lane !== 'string' || typeof v.title !== 'string' || !LANE_ORDER.includes(v.state) || !Array.isArray(v.steps)) throw new Error('invalid lane file')
         list.push(v)
       } catch {
         bad.push(f.name)
       }
     }
     lanes = list.sort((a, b) => LANE_ORDER.indexOf(a.state) - LANE_ORDER.indexOf(b.state) || a.lane.localeCompare(b.lane))
-    lanesError = bad.length ? '讀不懂：' + bad.join('、') : ''
+    lanesError = bad.length ? T.unreadable(bad) : ''
   } catch (err) {
-    lanesError = '讀取任務失敗：' + String(err)
+    lanesError = T.lanesReadFail(String(err))
   }
   // 別的 lane 變成等你、待審、失敗時提醒（第一次載入不提醒）
   for (const l of lanes) {
     const prev = laneStates[l.lane]
     laneStates[l.lane] = l.state
     if (!prev || prev === l.state || l.lane === selfLane) continue
-    if (l.state === 'blocked') $.ui.toast(clip(l.lane + ' 等你：' + (l.needs ?? ''), 80))
-    if (l.state === 'review') $.ui.toast(l.lane + ' 做完了，等驗收')
-    if (l.state === 'failed') $.ui.toast(l.lane + ' 失敗')
+    if (l.state === 'blocked') $.ui.toast(clip(T.toastBlocked(l.lane, l.needs ?? ''), 80))
+    if (l.state === 'review') $.ui.toast(T.toastReview(l.lane))
+    if (l.state === 'failed') $.ui.toast(T.toastFailed(l.lane))
   }
   $.ui.invalidate('ui.render')
 }
@@ -372,7 +732,7 @@ async function refreshScreen($, lane) {
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop()
     screens = { ...screens, [lane]: { lines, at, error: '' } }
   } catch (err) {
-    screens = { ...screens, [lane]: { lines: [], at, error: '讀不到畫面：' + clip(String(err), 80) } }
+    screens = { ...screens, [lane]: { lines: [], at, error: T.screenFail(clip(String(err), 80)) } }
   }
   $.ui.invalidate('ui.render')
 }
@@ -382,10 +742,10 @@ async function sendToLane($, lane, text) {
   if (!l?.pane || !String(text).trim()) return
   const r = await $.process.run([herdrBin, 'agent', 'prompt', l.pane, text], { timeoutMs: 10000 })
   if (r.exitCode !== 0) {
-    $.ui.toast('沒送出：' + clip(r.stderr || r.stdout || 'exit ' + r.exitCode, 60))
+    $.ui.toast(T.sendFail(clip(r.stderr || r.stdout || 'exit ' + r.exitCode, 60)))
     return
   }
-  $.ui.toast('已送給 ' + lane)
+  $.ui.toast(T.sentTo(lane))
   herdrCommandAt = await $.clock.now()
   $.clock.after(1500, () => refreshScreen($, lane))
 }
@@ -394,7 +754,7 @@ async function keyToLane($, lane, key) {
   const l = lanes.find((x) => x.lane === lane)
   if (!l?.pane) return
   const r = await $.process.run([herdrBin, 'agent', 'send-keys', l.pane, key], { timeoutMs: 5000 })
-  if (r.exitCode !== 0) $.ui.toast('按鍵沒送出：' + clip(r.stderr || 'exit ' + r.exitCode, 60))
+  if (r.exitCode !== 0) $.ui.toast(T.keyFail(clip(r.stderr || 'exit ' + r.exitCode, 60)))
   herdrCommandAt = await $.clock.now()
   $.clock.after(800, () => refreshScreen($, lane))
 }
@@ -405,12 +765,12 @@ async function loadReport($, lane) {
   try {
     const path = await expandPath($, l.report)
     if (!(await $.fs.exists(path))) {
-      reports = { ...reports, [lane]: { text: '', path, error: '報告檔不存在' } }
+      reports = { ...reports, [lane]: { text: '', path, error: T.reportMissing } }
     } else {
       reports = { ...reports, [lane]: { text: await $.fs.read(path), path, error: '' } }
     }
   } catch (err) {
-    reports = { ...reports, [lane]: { text: '', path: l.report, error: '讀不到報告：' + String(err) } }
+    reports = { ...reports, [lane]: { text: '', path: l.report, error: T.reportFail(String(err)) } }
   }
   $.ui.invalidate('ui.render')
 }
@@ -494,31 +854,19 @@ async function saveCompact($) {
     const meta = { at: compactInfo.at, tokensBefore: compactInfo.tokensBefore, tokensAfter: compactInfo.tokensAfter }
     await $.fs.write(compactFile, '<!-- baton: ' + JSON.stringify(meta) + ' -->\n' + compactInfo.summary + '\n')
   } catch (err) {
-    note = '寫入壓縮摘要失敗：' + String(err)
+    note = T.compactWriteFail(String(err))
   }
   $.ui.invalidate('ui.render')
 }
 
 function ago(ms) {
   const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return '剛剛'
-  if (s < 3600) return Math.floor(s / 60) + ' 分鐘前'
-  return Math.floor(s / 3600) + ' 小時前'
+  if (s < 60) return T.justNow
+  if (s < 3600) return T.minutesAgo(Math.floor(s / 60))
+  return T.hoursAgo(Math.floor(s / 3600))
 }
 
 const HERDR_AGENT_TARGETED = ['prompt', 'send-keys', 'read', 'wait', 'focus', 'get', 'rename', 'attach', 'explain']
-const HERDR_ACTION_LABELS = {
-  prompt: '派工作',
-  'send-keys': '送按鍵',
-  read: '讀輸出',
-  wait: '等待',
-  focus: '切換焦點',
-  start: '啟動 agent',
-  split: '分割出新 pane',
-  run: '執行指令',
-  'send-text': '送文字',
-  close: '關閉',
-}
 
 // 從一段 shell 指令找出 herdr agent／pane 指令的目標（Windows 上可能寫成 herdr.exe）
 function parseHerdr(command) {
@@ -571,7 +919,7 @@ async function refreshHerdr($) {
     herdrAgents = JSON.parse(r.stdout)?.result?.agents ?? []
     herdrError = ''
   } catch (err) {
-    herdrError = '讀取 herdr 失敗：' + String(err)
+    herdrError = T.herdrReadFail(String(err))
     return
   }
   // 指揮過的 agent 進入 blocked／done 時提醒
@@ -580,8 +928,8 @@ async function refreshHerdr($) {
     herdrStatus[a.pane_id] = a.agent_status
     if (!prev || prev === a.agent_status || !isCommanded(a)) continue
     const who = a.name || a.agent + ' ' + a.pane_id
-    if (a.agent_status === 'blocked') $.ui.toast(who + ' 在等待確認')
-    if (a.agent_status === 'done') $.ui.toast(who + ' 已完成')
+    if (a.agent_status === 'blocked') $.ui.toast(T.herdrBlocked(who))
+    if (a.agent_status === 'done') $.ui.toast(T.herdrDone(who))
   }
   $.ui.invalidate('ui.render')
 }
@@ -606,26 +954,23 @@ async function saveHerdr($) {
 }
 
 // lane 模式的交接：只帶一覽與自己的狀態，細節需要時再讀（不再整節附上交接文件）
+// 交接說明與指示要用到的路徑
+function briefingContext() {
+  return { tasksDir, selfLane, handoffFile, handoffSection, memoryDir, compactFile, projectSettingsFile, handoffAt: handoff.mtimeMs ? clock(handoff.mtimeMs) : '' }
+}
+
 function laneBriefing(now) {
-  const lines = [
-    '[baton] 這個專案用 lane 狀態檔交接：',
-    '- 任務狀態：' + tasksDir + '/<lane>.json，一條 lane 一個；你自己的是 ' + selfLane + '.json。格式與更新規則見該資料夾的 README。',
-    '- 詳細交接：' + handoffFile + (handoffSection ? ' 的「' + handoffSection + '」一節' : '') + '，需要細節時再讀。',
-    '- 記憶：' + memoryDir + '（frontmatter 的 metadata.layer 分成 user／project／workstream／phase）',
-    '- 主控 session 的提示快取快過期時，會要求你更新自己的狀態檔，接著自動壓縮對話。',
-    '',
-    '任務一覽（若和使用者這次的要求無關，可以忽略）：',
-  ]
-  if (lanesError) lines.push('（' + lanesError + '）')
+  const lines = T.laneBriefing(briefingContext())
+  if (lanesError) lines.push('(' + lanesError + ')')
   for (const l of lanes) {
     const { done, total, percent } = laneProgress(l)
-    lines.push(LANE_LOOK[l.state][0] + ' ' + l.lane + '：' + l.title + ' ' + percent + '%（' + done + '/' + total + '）· ' + laneStanding(l, now))
+    lines.push(LANE_LOOK[l.state][0] + ' ' + T.laneLine(l.lane, l.title, percent, done, total, laneStanding(l, now)))
   }
   const self = lanes.find((l) => l.lane === selfLane)
   if (self) {
-    lines.push('', '你自己的步驟（' + selfLane + '）：')
+    lines.push('', T.laneSelfSteps(selfLane))
     for (const s of self.steps) lines.push(STEP_ICONS[s.state] + ' ' + s.id + ' ' + s.title)
-    if (self.needs) lines.push('等使用者決定：' + self.needs)
+    if (self.needs) lines.push(T.laneSelfNeeds(self.needs))
     for (const n of self.notes ?? []) lines.push('• ' + n)
   }
   return lines.join('\n')
@@ -634,24 +979,9 @@ function laneBriefing(now) {
 // 附在 prompt 後面給 Claude 看的說明（使用者看不到）
 function briefing(now) {
   if (tasksDir) return laneBriefing(now)
-  const lines = [
-    '[baton] 這個專案使用 baton 交接機制：',
-    '- 交接文件：' +
-      handoffFile +
-      (handoffSection ? ' 的「' + handoffSection + '」一節（專案自己的文件，只更新這一節）' : '') +
-      (handoff.mtimeMs ? '（最後更新 ' + clock(handoff.mtimeMs) + '）' : '（尚未建立）'),
-    '- 壓縮摘要：' + compactFile,
-    '- 記憶資料夾：' + memoryDir,
-    '- 主控 session 的提示快取快過期時，會要求你更新交接文件，接著自動壓縮對話。',
-    '- 這個專案還沒開「任務」分頁。如果工作有多條並行的線（派工給 herdr、有待派工清單、交接裡同時好幾項進行中），找適當時機問使用者要不要建立；不要自己建。',
-    '  建法：在 ' +
-      projectSettingsFile +
-      ' 寫 {"tasks_dir": "<資料夾>"}，資料夾裡每條 lane 一個 <lane>.json：lane、title（一行）、state（blocked／failed／review／working／idle／done）、steps（{ id, title, state: todo|doing|done|skip }）、updated，選填 needs、pane、spec、head、report、notes；主控自己那條叫 ' +
-      selfLane +
-      '.json。',
-  ]
+  const lines = T.briefing(briefingContext())
   if (handoff.text) {
-    lines.push('', '以下是目前的交接文件，請據此接續先前的工作；若和使用者這次的要求無關，可以忽略。', '', '<handoff>', handoff.text.slice(0, 20000), '</handoff>')
+    lines.push('', T.briefingHandoff, '', '<handoff>', handoff.text.slice(0, 20000), '</handoff>')
   }
   return lines.join('\n')
 }
@@ -671,7 +1001,7 @@ async function loadMemories($) {
     }
     memories = list.sort((a, b) => a.name.localeCompare(b.name))
   } catch (err) {
-    note = '讀取記憶失敗：' + String(err)
+    note = T.memoryReadFail(String(err))
   }
   $.ui.invalidate('ui.render')
 }
@@ -698,46 +1028,28 @@ async function saveTimes($) {
 }
 
 function handoffPrompt(remainingMs) {
-  const head = HANDOFF_PREFIX + ' 提示快取約 ' + Math.max(1, Math.round(remainingMs / 60000)) + ' 分鐘後過期，接下來會自動壓縮對話。請立刻：'
-  if (tasksDir) {
-    return [
-      head,
-      '1. 覆寫你自己的狀態檔 `' + tasksDir + '/' + selfLane + '.json`：steps 的狀態照實更新；要使用者決定的事寫 needs；接手需要知道、但不屬於任何步驟的事寫 notes（最多 8 則，一行一則）。依該資料夾 README 的規則驗證，並更新它說要產生的總覽。',
-      '2. 你驗收過或確認過狀態改變的 lane，也更新它們的狀態檔。',
-      '3. 若有值得長期保存的使用者叮囑或專案事實，順手更新記憶（`' + memoryDir + '`，標上 metadata.layer）。',
-      '4. 不要開始新的工作。寫完用一兩句回報即可。',
-    ].join('\n')
-  }
-  const write = handoffSection
-    ? '1. 更新 `' + handoffFile + '` 中目前的「' + handoffSection + '」那一節（這是專案自己的文件：依它既有的格式與慣例更新，不要整份覆寫、不要動其他章節）：'
-    : '1. 把目前的處理進度寫進 `' + handoffFile + '`（整份覆寫、精簡）：'
-  return [
-    head,
-    write + '目標、已完成、進行中、下一步、關鍵檔案與決策、待使用者確認的問題。',
-    '2. 若有值得長期保存的使用者叮囑或專案事實，順手更新記憶（`' + memoryDir + '`）。',
-    '3. 不要開始新的工作。寫完用一兩句回報即可。',
-  ].join('\n')
+  const head = T.handoffPrefix + ' ' + T.handoffHead(Math.max(1, Math.round(remainingMs / 60000)))
+  const steps = tasksDir ? T.handoffLane(briefingContext()) : T.handoffDocSteps(briefingContext())
+  return [head, ...steps].join('\n')
 }
 
 function compactInstructions() {
-  if (tasksDir) return '保留 ' + tasksDir + ' 的 lane 狀態檔所指的進度、等待使用者決定的事與下一步；壓縮後以狀態檔為準繼續工作。'
-  const where = handoffSection ? handoffFile + ' 的「' + handoffSection + '」一節' : handoffFile
-  return '保留 ' + where + ' 的重點、目前任務狀態與下一步；壓縮後以交接文件為準繼續工作。'
+  return tasksDir ? T.compactLane(tasksDir) : T.compactDoc(handoffFile, handoffSection)
 }
 
 async function startHandoff($, remainingMs) {
   phase = 'handoff'
   handoffTurnId = ''
   handoffSentAt = await $.clock.now()
-  note = '已送出交接指示'
-  $.ui.toast('快取即將過期，開始寫交接文件')
+  note = T.handoffSent
+  $.ui.toast(T.handoffToast)
   $.ui.invalidate('ui.render')
   // 不 await：submit 會等到 session 閒置才開始新的一輪；被擋或失敗時退回 idle，免得一直卡在「交接中…」
   void $.prompt.submit({ text: handoffPrompt(remainingMs) }).then(
     (r) => {
-      if (r?.drop !== undefined) failHandoff($, '交接指示被擋下：' + r.drop)
+      if (r?.drop !== undefined) failHandoff($, T.handoffBlocked(r.drop))
     },
-    (err) => failHandoff($, '交接指示送出失敗：' + String(err)),
+    (err) => failHandoff($, T.handoffSubmitFail(String(err))),
   )
 }
 
@@ -754,7 +1066,7 @@ async function handoffNow($) {
   // 交接指示送出超過一分鐘，那一輪卻一直沒開始、現在也沒在跑：當作沒送到，重送
   if (phase === 'handoff' && !handoffTurnId && !working && (await $.clock.now()) - handoffSentAt > 60000) phase = 'idle'
   if (phase !== 'idle') {
-    $.ui.toast(phase === 'handoff' ? '已經在交接中' : '正在壓縮中')
+    $.ui.toast(phase === 'handoff' ? T.alreadyHandingOff : T.alreadyCompacting)
     return
   }
   const remaining = lastRequestAt ? lastRequestAt + ttlMs() - (await $.clock.now()) : LEAD_MS
@@ -764,7 +1076,7 @@ async function handoffNow($) {
 async function runCompact($) {
   try {
     const r = await $.session.compact({ instructions: compactInstructions() })
-    note = r.skip ? '壓縮被略過：' + r.skip : '交接完成並已壓縮'
+    note = r.skip ? T.compactSkipped(r.skip) : T.compactDone
     phase = 'idle'
     armed = false
   } catch (err) {
@@ -774,7 +1086,7 @@ async function runCompact($) {
       $.clock.after(3000, () => runCompact($))
       return
     }
-    note = '壓縮失敗：' + String(err)
+    note = T.compactFail(String(err))
     phase = 'idle'
     armed = false
   }
@@ -794,11 +1106,27 @@ async function checkTrigger($) {
   const percent = usage?.context?.percent ?? 0
   if (percent < MIN_CONTEXT_PERCENT) {
     armed = false
-    note = '上下文只有 ' + Math.round(percent) + '%，略過自動交接'
+    note = T.contextTooSmall(Math.round(percent))
     $.ui.invalidate('ui.render')
     return
   }
   await startHandoff($, remaining)
+}
+
+// auto：先看 Claude Code 的 language 設定（例如「繁體中文」「English」），沒設再看 LANG 之類的環境變數
+// 目前只有繁體中文與英文；任何中文都用繁體中文，其他語言用英文
+async function detectLanguage($) {
+  if (languageSetting in I18N) return languageSetting
+  const isChinese = (s) => /中文|漢|汉|chinese|^zh/i.test(s)
+  try {
+    const { language } = await $.settings.read()
+    if (typeof language === 'string' && language.trim()) return isChinese(language.trim()) ? 'zh-TW' : 'en'
+  } catch {
+    // 讀不到設定就看環境變數
+  }
+  const locale = (await $.env.get('LC_ALL')) || (await $.env.get('LC_MESSAGES')) || (await $.env.get('LANG')) || ''
+  if (locale) return isChinese(locale) ? 'zh-TW' : 'en'
+  return 'en'
 }
 
 function ttlMs() {
@@ -827,7 +1155,7 @@ async function toggleBoard($) {
   await loadLanes($)
   await refreshHerdr($)
   // columns：停靠在右側時想要的寬度（使用者拖曳調整過的寬度優先；放在輸入框上方時不適用）
-  await $.ui.open({ id: PANE, title: '工作看板', focus: true, columns: 50 })
+  await $.ui.open({ id: PANE, title: T.paneTitle, focus: true, columns: 50 })
   paneOpen = true
   if (!activated) {
     activated = true
@@ -845,6 +1173,7 @@ export function register(on, options) {
   if (typeof options?.launcher_button === 'boolean') launcherButton = options.launcher_button
   const awayHours = Number(options?.away_hours)
   if (awayHours > 0) activeWindowMs = awayHours * HOUR
+  if (options?.language in I18N || options?.language === 'auto') languageSetting = options.language
 
   // 切換模型時引擎會告知目前的快取 TTL，以它為準
   on('classic.PostModelSwitch', async ($, e, next) => {
@@ -854,6 +1183,7 @@ export function register(on, options) {
   })
 
   on('session.start', async ($, e, next) => {
+    T = I18N[await detectLanguage($)]
     sessionId = await $.session.id()
     const savedAuto = await $.store.get('auto')
     if (typeof savedAuto === 'boolean') auto = savedAuto
@@ -900,15 +1230,15 @@ export function register(on, options) {
 
     // 不自動開啟，只有輸入 /board 才會出現
     try {
-      await $.command.register({ name: 'board', description: '開關工作看板（進度／記憶／快取倒數）', immediate: true })
+      await $.command.register({ name: 'board', description: T.cmdBoard, immediate: true })
     } catch (err) {
-      note = '註冊 /board 失敗：' + String(err)
+      note = T.registerFail('board', String(err))
     }
     // 非全螢幕時滑鼠點不到看板按鈕，用指令觸發立即交接
     try {
-      await $.command.register({ name: 'handoff', description: '立即交接：寫交接文件後壓縮對話（等同看板的「立即交接」）', immediate: true })
+      await $.command.register({ name: 'handoff', description: T.cmdHandoff, immediate: true })
     } catch (err) {
-      note = '註冊 /handoff 失敗：' + String(err)
+      note = T.registerFail('handoff', String(err))
     }
     return next(e)
   })
@@ -931,7 +1261,7 @@ export function register(on, options) {
     return Box({
       flexDirection: 'row',
       justifyContent: 'flex-end',
-      children: [Button({ key: 'open-board', label: '◧ 工作看板', plain: true, dimColor: true, onPress: () => toggleBoard($) })],
+      children: [Button({ key: 'open-board', label: T.launcher, plain: true, dimColor: true, onPress: () => toggleBoard($) })],
     })
   })
 
@@ -969,7 +1299,7 @@ export function register(on, options) {
       currentTool = ''
       // 只認自己送出的交接指示；使用者剛好先送出的那一輪不算
       // 引擎會在外掛送的訊息前加「The baton plugin sent a message: 」，所以不能用 startsWith
-      if (phase === 'handoff' && !handoffTurnId && String(e.text ?? '').includes(HANDOFF_PREFIX)) handoffTurnId = e.turnId
+      if (phase === 'handoff' && !handoffTurnId && HANDOFF_PREFIXES.some((p) => String(e.text ?? '').includes(p))) handoffTurnId = e.turnId
       $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -996,11 +1326,11 @@ export function register(on, options) {
         if (e.isAborted) {
           phase = 'idle'
           armed = false
-          note = '交接那一輪被中斷，本次不壓縮'
+          note = T.handoffAborted
         } else {
           phase = 'compacting'
           compactTries = 0
-          note = '交接文件已寫好，準備壓縮'
+          note = T.handoffWritten
           // 等這一輪完全結束再壓縮
           $.clock.after(1500, () => runCompact($))
         }
@@ -1144,15 +1474,15 @@ export function register(on, options) {
     const progressBody = () => {
       const rows = []
       if (working) {
-        rows.push(line(['● 執行中 ' + duration(now - turnStartedAt) + ' · 本輪工具 ' + toolCalls + ' 次'], { color: 'green' }))
+        rows.push(line([T.runningTools(duration(now - turnStartedAt), toolCalls)], { color: 'green' }))
         if (currentTool) rows.push(longLine('  ' + currentTool, { dimColor: true }))
       } else {
-        rows.push(line(['○ 閒置'], { dimColor: true }))
+        rows.push(line([T.idleState], { dimColor: true }))
       }
 
       const stats = []
       const percent = usage?.context?.percent
-      if (typeof percent === 'number') stats.push('上下文 ' + Math.round(percent) + '%')
+      if (typeof percent === 'number') stats.push(T.context(Math.round(percent)))
       for (const r of usage?.rateLimits ?? []) {
         const label = r.kind === 'five_hour' ? '5h' : r.kind === 'seven_day' ? '7d' : r.kind
         stats.push(label + ' ' + Math.round(r.percentUsed) + '%')
@@ -1165,7 +1495,7 @@ export function register(on, options) {
         : Object.values(tasks)
       if (taskList.length) {
         const done = taskList.filter((t) => t.status === 'completed').length
-        rows.push(blank(), line(['任務 ' + done + '/' + taskList.length + '  ' + bar(done / taskList.length, 12)], { bold: true }))
+        rows.push(blank(), line([T.tasksHeader(done, taskList.length) + '  ' + bar(done / taskList.length, 12)], { bold: true }))
         for (const t of taskList) {
           const mark = t.status === 'completed' ? '✔' : t.status === 'in_progress' ? '◐' : '○'
           const text = t.status === 'in_progress' && t.active ? t.active : t.subject
@@ -1179,7 +1509,7 @@ export function register(on, options) {
       }
 
       if (lastAnswer) {
-        rows.push(blank(), line(['上一輪回覆'], { bold: true }), longLine(clip(lastAnswer, cols * 3), { dimColor: true }))
+        rows.push(blank(), line([T.lastReply], { bold: true }), longLine(clip(lastAnswer, cols * 3), { dimColor: true }))
       }
 
       if (compactInfo.summary) {
@@ -1189,7 +1519,7 @@ export function register(on, options) {
           blank(),
           Button({
             key: 'toggle-compact',
-            label: (compactOpen ? '▾ ' : '▸ ') + '壓縮後保留（' + clock(compactInfo.at) + tokens + '）',
+            label: (compactOpen ? '▾ ' : '▸ ') + T.compactKept(clock(compactInfo.at) + tokens),
             plain: true,
             onPress: () => {
               compactOpen = !compactOpen
@@ -1204,12 +1534,12 @@ export function register(on, options) {
       rows.push(blank())
       if (handoff.text) {
         rows.push(
-          line(['交接文件（' + clock(handoff.mtimeMs) + '）' + (handoffSection ? ' · 只讀「' + handoffSection + '」一節' : '')], { bold: true }),
+          line([T.handoffDoc(clock(handoff.mtimeMs)) + (handoffSection ? T.onlySection(handoffSection) : '')], { bold: true }),
           longLine(handoffFile, { dimColor: true }, 'truncate-middle'),
           Markdown({ key: 'handoff', text: handoff.text.slice(0, 6000) }),
         )
       } else {
-        rows.push(line(['尚無交接文件'], { dimColor: true }), longLine(handoffFile, { dimColor: true }, 'truncate-middle'))
+        rows.push(line([T.noHandoff], { dimColor: true }), longLine(handoffFile, { dimColor: true }, 'truncate-middle'))
       }
       return rows
     }
@@ -1219,7 +1549,7 @@ export function register(on, options) {
     const memItem = (m, prefix = '') => {
       const isOpen = expanded === m.file
       const overdue = m.reviewBy && m.reviewBy < today
-      const tags = [m.lane ? '〔' + m.lane + '〕' : '', overdue ? ' ⚠ 該檢查了' : ''].join('')
+      const tags = [m.lane ? '〔' + m.lane + '〕' : '', overdue ? T.dueReview : ''].join('')
       const rows = [
         Button({
           key: prefix + 'mem-' + m.file,
@@ -1240,22 +1570,22 @@ export function register(on, options) {
     const memoryBody = () => {
       const rows = [
         row([
-          Text({ dimColor: true, children: [memories.length + ' 則記憶'] }),
+          Text({ dimColor: true, children: [T.memoryCount(memories.length)] }),
           Button({
             key: 'reload-memory',
-            label: '重新整理',
+            label: T.refresh,
             onPress: () => loadMemories($),
           }),
         ]),
       ]
       rows.push(longLine(memoryDir, { dimColor: true }, 'truncate-middle'))
       if (!memories.length) {
-        rows.push(line(['這個資料夾還沒有記憶。'], { dimColor: true }))
+        rows.push(line([T.noMemories], { dimColor: true }))
         return rows
       }
-      const known = LAYERS.map(([key]) => key)
-      for (const [key, label, hint] of [...LAYERS, ['none', '未分層', '還沒標 layer']]) {
-        const items = memories.filter((m) => (key === 'none' ? !known.includes(m.layer) : m.layer === key))
+      for (const key of [...LAYERS, 'none']) {
+        const [label, hint] = T.layers[key]
+        const items = memories.filter((m) => (key === 'none' ? !LAYERS.includes(m.layer) : m.layer === key))
         if (!items.length) continue
         const isOpen = layersOpen[key] !== false
         const overdue = items.filter((m) => m.reviewBy && m.reviewBy < today).length
@@ -1263,7 +1593,7 @@ export function register(on, options) {
           blank(),
           Button({
             key: 'layer-' + key,
-            label: (isOpen ? '▾ ' : '▸ ') + label + '（' + items.length + '）' + (overdue ? ' ⚠ ' + overdue + ' 則該檢查了' : ''),
+            label: (isOpen ? '▾ ' : '▸ ') + T.count(label, items.length) + (overdue ? T.dueReviewN(overdue) : ''),
             plain: true,
             onPress: () => {
               layersOpen = { ...layersOpen, [key]: !isOpen }
@@ -1280,11 +1610,10 @@ export function register(on, options) {
           for (const m of items) rows.push(...memItem(m))
           continue
         }
-        const types = TYPE_LABELS.map(([type]) => type)
-        for (const [type, typeLabel] of [...TYPE_LABELS, ['other', '其他']]) {
-          const typed = items.filter((m) => (type === 'other' ? !types.includes(m.type) : m.type === type))
+        for (const type of [...MEMORY_TYPES, 'other']) {
+          const typed = items.filter((m) => (type === 'other' ? !MEMORY_TYPES.includes(m.type) : m.type === type))
           if (!typed.length) continue
-          rows.push(line(['  ' + typeLabel + '（' + typed.length + '）'], { dimColor: true }))
+          rows.push(line(['  ' + T.count(T.types[type], typed.length)], { dimColor: true }))
           for (const m of typed) rows.push(...memItem(m))
         }
       }
@@ -1293,7 +1622,7 @@ export function register(on, options) {
 
     // 分頁：任務
     const back = (trail) =>
-      row([Button({ key: 'nav-back', label: '← 返回', onPress: () => goBack($) }), Text({ dimColor: true, wrap: 'truncate-end', children: [trail] })])
+      row([Button({ key: 'nav-back', label: T.back, onPress: () => goBack($) }), Text({ dimColor: true, wrap: 'truncate-end', children: [trail] })])
 
     const laneRow = (l) => {
       const { done, total, percent } = laneProgress(l)
@@ -1330,19 +1659,19 @@ export function register(on, options) {
       const rows = []
       if (lanesError) rows.push(longLine(lanesError, { color: 'red' }))
       if (!lanes.length) {
-        rows.push(line(['還沒有 lane 狀態檔。'], { dimColor: true }), longLine(tasksDir, { dimColor: true }, 'truncate-middle'))
+        rows.push(line([T.noLanes], { dimColor: true }), longLine(tasksDir, { dimColor: true }, 'truncate-middle'))
         return rows
       }
       const attention = lanes.filter(needsAttention)
       const active = lanes.filter((l) => l.state === 'working' && !attention.includes(l))
       const quiet = lanes.filter((l) => !attention.includes(l) && !active.includes(l))
       if (attention.length) {
-        rows.push(line(['需要處理 ' + attention.length], { bold: true }))
+        rows.push(line([T.needsYou(attention.length)], { bold: true }))
         for (const l of attention) rows.push(...laneRow(l))
         rows.push(blank())
       }
       if (active.length) {
-        rows.push(line(['進行中 ' + active.length], { bold: true }))
+        rows.push(line([T.working(active.length)], { bold: true }))
         for (const l of active) rows.push(...laneRow(l))
         rows.push(blank())
       }
@@ -1351,7 +1680,7 @@ export function register(on, options) {
         rows.push(
           Button({
             key: 'toggle-quiet',
-            label: (quietOpen ? '▾ ' : '▸ ') + '待命 ' + idle + ' · 已完成 ' + (quiet.length - idle),
+            label: (quietOpen ? '▾ ' : '▸ ') + T.quiet(idle, quiet.length - idle),
             plain: true,
             onPress: () => {
               quietOpen = !quietOpen
@@ -1365,7 +1694,7 @@ export function register(on, options) {
       const tracked = new Set(lanes.map((l) => laneAgent(l)?.pane_id).filter(Boolean))
       const others = herdrAgents.filter((a) => a.workspace_id === herdrWorkspace && a.pane_id !== herdrSelf && !tracked.has(a.pane_id))
       if (others.length) {
-        rows.push(blank(), line(['其他 agent（沒有狀態檔）' + others.length], { dimColor: true }))
+        rows.push(blank(), line([T.otherAgents(others.length)], { dimColor: true }))
         for (const a of others) rows.push(longLine('  ' + (LANE_LOOK[a.agent_status === 'working' ? 'working' : a.agent_status === 'blocked' ? 'blocked' : 'idle'][0]) + ' ' + (a.name || a.pane_id) + ' · ' + (a.terminal_title_stripped || a.agent), { dimColor: true }))
       }
       return rows
@@ -1373,11 +1702,12 @@ export function register(on, options) {
 
     const lanePage = (l) => {
       const { done, total, percent } = laneProgress(l)
-      const [icon, color, label] = LANE_LOOK[l.state]
+      const [icon, color] = LANE_LOOK[l.state]
+      const label = T.laneStates[l.state]
       const agent = laneAgent(l)
       const updated = Date.parse(l.updated)
       const rows = [
-        back('任務 › ' + l.lane),
+        back(T.tasks + ' › ' + l.lane),
         blank(),
         Box({
           flexDirection: 'row',
@@ -1387,11 +1717,11 @@ export function register(on, options) {
           ],
         }),
         longLine(
-          icon + ' ' + label + (agent ? ' · Herdr ' + agent.agent_status : '') + (updated ? ' · 更新 ' + ago(now - updated) : '') + (l.head ? ' · HEAD ' + l.head : ''),
+          icon + ' ' + label + (agent ? ' · Herdr ' + agent.agent_status : '') + (updated ? ' · ' + T.updated(ago(now - updated)) : '') + (l.head ? ' · HEAD ' + l.head : ''),
           { color },
         ),
       ]
-      if (l.spec) rows.push(longLine('規格 ' + l.spec, { dimColor: true }, 'truncate-middle'))
+      if (l.spec) rows.push(longLine(T.spec + l.spec, { dimColor: true }, 'truncate-middle'))
       rows.push(blank())
       for (const s of l.steps) {
         rows.push(
@@ -1401,9 +1731,9 @@ export function register(on, options) {
           }),
         )
       }
-      if (l.state === 'blocked' && l.needs) rows.push(blank(), line(['等你決定'], { bold: true, color: 'red' }), line([l.needs]))
+      if (l.state === 'blocked' && l.needs) rows.push(blank(), line([T.decide], { bold: true, color: 'red' }), line([l.needs]))
       if (l.notes?.length) {
-        rows.push(blank(), line(['備註'], { bold: true }))
+        rows.push(blank(), line([T.notes], { bold: true }))
         for (const n of l.notes) rows.push(longLine('• ' + n, { dimColor: true }))
       }
 
@@ -1412,18 +1742,18 @@ export function register(on, options) {
         rows.push(
           blank(),
           row([
-            Text({ bold: true, children: ['即時畫面'] }),
-            Text({ dimColor: true, children: [screen?.at ? ago(now - screen.at) : '讀取中…'] }),
+            Text({ bold: true, children: [T.liveScreen] }),
+            Text({ dimColor: true, children: [screen?.at ? ago(now - screen.at) : T.loading] }),
             Button({
               key: 'screen-size',
-              label: screenLong ? '少一點' : '多一點',
+              label: screenLong ? T.less : T.more,
               plain: true,
               onPress: () => {
                 screenLong = !screenLong
                 redraw()
               },
             }),
-            Button({ key: 'screen-refresh', label: '重新整理', plain: true, onPress: () => refreshScreen($, l.lane) }),
+            Button({ key: 'screen-refresh', label: T.refresh, plain: true, onPress: () => refreshScreen($, l.lane) }),
           ]),
         )
         if (screen?.error) rows.push(longLine(screen.error, { color: 'red' }))
@@ -1432,25 +1762,25 @@ export function register(on, options) {
         rows.push(
           row(
             [
-              Text({ dimColor: true, children: ['按鍵'] }),
+              Text({ dimColor: true, children: [T.keys] }),
               ...LANE_KEYS.map(([key, keyLabel]) => Button({ key: 'lane-key-' + key, label: keyLabel, onPress: () => keyToLane($, l.lane, key) })),
             ],
             1,
           ),
           Input({
             key: 'lane-reply',
-            placeholder: laneDialog(l) ? '對話框在等確認，先用上面的按鍵' : '回覆 ' + l.lane + '…',
-            submitLabel: '送出',
+            placeholder: laneDialog(l) ? T.dialogPlaceholder : T.replyPlaceholder(l.lane),
+            submitLabel: T.send,
             onSubmit: (text) => sendToLane($, l.lane, text),
           }),
         )
       }
 
       const extra = []
-      if (l.report) extra.push(Button({ key: 'lane-report', label: '▸ 報告 ' + l.report.split(/[\\/]/).pop(), plain: true, onPress: () => openPage($, { view: 'report', lane: l.lane, back: 'lane-report' }) }))
+      if (l.report) extra.push(Button({ key: 'lane-report', label: '▸ ' + T.report + ' ' + l.report.split(/[\\/]/).pop(), plain: true, onPress: () => openPage($, { view: 'report', lane: l.lane, back: 'lane-report' }) }))
       const laneMemories = memories.filter((m) => m.lane === l.lane)
       if (laneMemories.length) {
-        extra.push(line(['這條線的記憶（' + laneMemories.length + '）'], { bold: true }))
+        extra.push(line([T.laneMemories(laneMemories.length)], { bold: true }))
         for (const m of laneMemories) extra.push(...memItem(m, 'lane-'))
       }
       if (extra.length) rows.push(blank(), ...extra)
@@ -1459,8 +1789,8 @@ export function register(on, options) {
 
     const reportPage = (l) => {
       const report = reports[l.lane]
-      const rows = [back('任務 › ' + l.lane + ' › 報告'), blank()]
-      if (!report) return [...rows, line(['讀取中…'], { dimColor: true })]
+      const rows = [back(T.tasks + ' › ' + l.lane + ' › ' + T.report), blank()]
+      if (!report) return [...rows, line([T.loading], { dimColor: true })]
       rows.push(longLine(report.path, { dimColor: true }, 'truncate-middle'))
       if (report.error) return [...rows, line([report.error], { color: 'red' })]
       return [...rows, Markdown({ key: 'report-' + l.lane, text: report.text.slice(0, 12000) })]
@@ -1470,7 +1800,7 @@ export function register(on, options) {
       const page = route[route.length - 1]
       const l = page && lanes.find((x) => x.lane === page.lane)
       if (!page) return taskList()
-      if (!l) return [back('任務'), line(['這條 lane 的狀態檔不見了。'], { dimColor: true })]
+      if (!l) return [back(T.tasks), line([T.laneGone], { dimColor: true })]
       return page.view === 'report' ? reportPage(l) : lanePage(l)
     }
 
@@ -1486,7 +1816,7 @@ export function register(on, options) {
       const [icon, color] = a ? HERDR_ICONS[a.agent_status] ?? ['?', undefined] : ['✕', undefined]
       const head = a
         ? icon + ' ' + (a.name ? a.name + '（' + a.agent + '）' : a.agent) + ' ' + a.pane_id + ' · ' + a.agent_status
-        : icon + ' ' + key + ' · 已結束或不是 agent pane'
+        : icon + ' ' + key + ' · ' + T.notAgent
       const rows = [line([head], { color, dimColor: !a, bold: a?.agent_status === 'blocked', wrap: 'truncate-end' })]
       if (a?.terminal_title_stripped) rows.push(longLine('  ' + a.terminal_title_stripped, { dimColor: true }))
       if (extra) rows.push(longLine('  ' + extra, { dimColor: true }))
@@ -1495,8 +1825,8 @@ export function register(on, options) {
     const herdrBody = () => {
       const rows = [
         row([
-          Text({ dimColor: true, children: ['本 pane ' + herdrSelf] }),
-          Button({ key: 'reload-herdr', label: '重新整理', onPress: () => refreshHerdr($) }),
+          Text({ dimColor: true, children: [T.thisPane(herdrSelf)] }),
+          Button({ key: 'reload-herdr', label: T.refresh, onPress: () => refreshHerdr($) }),
         ]),
       ]
       if (herdrError) rows.push(longLine(herdrError, { color: 'red' }))
@@ -1514,16 +1844,16 @@ export function register(on, options) {
         commanded.push({ t, a })
       }
 
-      rows.push(blank(), line(['這個 session 指揮的（' + commanded.length + '）'], { bold: true }))
-      if (!commanded.length) rows.push(line(['還沒有透過 herdr 指揮其他 pane。'], { dimColor: true }))
+      rows.push(blank(), line([T.commanded(commanded.length)], { bold: true }))
+      if (!commanded.length) rows.push(line([T.noCommanded], { dimColor: true }))
       for (const { t, a } of commanded) {
-        const action = HERDR_ACTION_LABELS[t.action] ?? t.action
-        rows.push(...agentRow(t.target, a, '最後：' + action + (t.detail ? '「' + t.detail + '」' : '') + ' · ' + ago(now - t.at)))
+        const action = T.herdrActions[t.action] ?? t.action
+        rows.push(...agentRow(t.target, a, T.lastAction(action, t.detail, ago(now - t.at))))
       }
 
       const others = herdrAgents.filter((a) => a.workspace_id === herdrWorkspace && a.pane_id !== herdrSelf && !seen.has(a.pane_id))
       if (others.length) {
-        rows.push(blank(), line(['同工作區的其他 agent（' + others.length + '）'], { bold: true }))
+        rows.push(blank(), line([T.sameWorkspace(others.length)], { bold: true }))
         for (const a of others) rows.push(...agentRow(a.pane_id, a))
       }
       return rows
@@ -1535,37 +1865,37 @@ export function register(on, options) {
       let cacheLine
       let color
       if (!lastRequestAt) {
-        cacheLine = '快取 ' + '░'.repeat(width) + ' 尚未建立'
+        cacheLine = T.cache + ' ' + '░'.repeat(width) + ' ' + T.cacheNotYet
         color = undefined
       } else {
         const remaining = lastRequestAt + ttlMs() - now
         if (remaining <= 0) {
-          cacheLine = '快取 ' + '░'.repeat(width) + ' 已過期 ' + duration(-remaining) + ' 前'
+          cacheLine = T.cache + ' ' + '░'.repeat(width) + ' ' + T.cacheExpired(duration(-remaining))
           color = 'red'
         } else {
-          cacheLine = '快取 ' + bar(remaining / ttlMs(), width) + ' ' + duration(remaining)
+          cacheLine = T.cache + ' ' + bar(remaining / ttlMs(), width) + ' ' + duration(remaining)
           color = remaining <= LEAD_MS ? 'red' : remaining <= 2 * LEAD_MS ? 'yellow' : 'green'
         }
       }
       const phaseLabel =
         phase === 'handoff'
-          ? '交接中…'
+          ? T.handingOff
           : phase === 'compacting'
-            ? '壓縮中…'
+            ? T.compacting
             : !auto
               ? ''
               : cacheTtl !== '1h'
-                ? '快取 ' + cacheTtl + '，不自動交接'
+                ? T.ttlNoAuto(cacheTtl)
                 : armed
-                  ? '待命'
-                  : '已完成，等新指示'
+                  ? T.standby
+                  : T.doneWaiting
 
       return [
         rule(),
-        ...(model ? [line(['模型 ' + model], { dimColor: true, wrap: 'truncate-end' })] : []),
+        ...(model ? [line([T.model(model)], { dimColor: true, wrap: 'truncate-end' })] : []),
         line([cacheLine], { color, wrap: 'truncate-end' }),
         row([
-          toggle('toggle-auto', '自動交接', auto, async () => {
+          toggle('toggle-auto', T.autoHandoff, auto, async () => {
             auto = !auto
             redraw()
             await $.store.set('auto', auto)
@@ -1573,7 +1903,7 @@ export function register(on, options) {
           ...(phaseLabel ? [Text({ dimColor: true, children: [phaseLabel] })] : []),
           Button({
             key: 'handoff-now',
-            label: '立即交接',
+            label: T.handoffNow,
             dimColor: phase !== 'idle',
             onPress: () => handoffNow($),
           }),
@@ -1587,12 +1917,12 @@ export function register(on, options) {
       children: [
         row(
           [
-            ...(tasksDir ? [tabButton('tasks', '任務' + (lanes.filter(needsAttention).length ? ' ⚠' + lanes.filter(needsAttention).length : ''))] : []),
-            tabButton('memory', '記憶 (' + memories.length + ')'),
-            tabButton('progress', tasksDir ? '交接' : '進度'),
+            ...(tasksDir ? [tabButton('tasks', T.tasks + (lanes.filter(needsAttention).length ? ' ⚠' + lanes.filter(needsAttention).length : ''))] : []),
+            tabButton('memory', T.tabMemory(memories.length)),
+            tabButton('progress', tasksDir ? T.tabHandoff : T.tabProgress),
             // 有任務分頁時 Herdr 退到後台：lane 的畫面與操作都在任務的子頁裡
             ...(herdrEnv && !tasksDir ? [tabButton('herdr', 'Herdr')] : []),
-            toggle('toggle-wrap', '換行', wrapLong, async () => {
+            toggle('toggle-wrap', T.wrap, wrapLong, async () => {
               wrapLong = !wrapLong
               redraw()
               await $.store.set('wrap', wrapLong)

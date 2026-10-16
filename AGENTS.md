@@ -24,7 +24,7 @@ baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一
 
 由上往下：
 
-1. **常數**：快取 TTL（`CACHE_TTLS`）、提前交接時間（`LEAD_MS` = 5 分鐘）、最低上下文（`MIN_CONTEXT_PERCENT` = 20）、lane 狀態順序與外觀（`LANE_ORDER`、`LANE_LOOK`）、記憶分層（`LAYERS`）
+1. **常數**：快取 TTL（`CACHE_TTLS`）、提前交接時間（`LEAD_MS` = 5 分鐘）、最低上下文（`MIN_CONTEXT_PERCENT` = 20）、lane 狀態順序與外觀（`LANE_ORDER`、`LANE_LOOK`）、記憶分層（`LAYERS`）、所有介面與提示文字（`I18N`）
 2. **模組層級的狀態**：`let` 變數（介面、執行狀態、herdr、lane、記憶、交接、`phase`）。整個外掛是一個 session 一份狀態
 3. **工具函式**：路徑展開（`expandPath`、`resolvePaths`）、記憶解析（`parseMemory`）、lane（`loadLanes`、`laneStanding`…）、herdr（`parseHerdr`、`refreshHerdr`）、交接（`briefing`、`handoffPrompt`、`startHandoff`、`runCompact`、`checkTrigger`）
 4. **`register(on, options)`**：註冊 hook
@@ -38,7 +38,7 @@ baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一
 
 ### 交接狀態機
 
-`phase`：`idle` → `handoff`（已送出 `[自動交接]` 指示）→ `compacting` → `idle`。
+`phase`：`idle` → `handoff`（已送出交接指示，開頭是目前語言的 `handoffPrefix`）→ `compacting` → `idle`。
 
 - `checkTrigger` 每秒跑一次，條件全部成立才 `startHandoff`：`activated`（輸入過 `/board`）、`auto`、`armed`（使用者有新動作後才重新允許）、`cacheTtl === '1h'`、剩餘時間在 0～5 分鐘、使用者沒離開超過 `away_hours`、上下文 ≥ 20%
 - 只認 `turn.start` 文字裡含 `HANDOFF_PREFIX` 的那一輪是交接輪（引擎會在外掛訊息前加前綴，所以用 `includes` 不用 `startsWith`）
@@ -47,7 +47,8 @@ baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一
 
 ## 慣例
 
-- **語言**：程式註解、介面文字、測試名稱用繁體中文（台灣用語）。改了介面文字或行為，`README.md` 與 `README.en.md` 都要更新
+- **介面語言**：使用者看得到的文字（看板、toast、指令說明）和送給 Claude 的文字（briefing、交接指示、壓縮指示）一律放在 `I18N`，用 `T.xxx` 取用，不要在程式裡寫死字串。新增一項就要同時補 `zh-TW` 和 `en`。語言在 `session.start` 由 `detectLanguage` 決定
+- **文件**：改了介面文字或行為，`README.md` 與 `README.en.md` 都要更新；程式註解與測試名稱目前用繁體中文
 - **風格**：2 格縮排、單引號、不加分號、尾隨逗號；跟周圍程式一致
 - **註解**：寫「為什麼」，尤其是引擎行為的限制（例如「command.run 裡不能直接 prompt.submit」）
 - **路徑**：內部一律轉成 `/` 分隔；比對用 `samePath`（不分大小寫）。新功能要同時考慮 macOS（`HOME`）與 Windows（`USERPROFILE`、磁碟代號）
@@ -78,8 +79,9 @@ claude plugin test
 
 | 想做的事 | 從這裡看 |
 | --- | --- |
-| 改交接指示的內容 | `handoffPrompt`、`compactInstructions` |
-| 改新 session 附給 Claude 的說明 | `briefing`、`laneBriefing` |
+| 改交接指示的內容 | `I18N` 的 `handoffHead`、`handoffLane`、`handoffDocSteps`、`compactLane`、`compactDoc` |
+| 改新 session 附給 Claude 的說明 | `I18N` 的 `briefing`、`laneBriefing` |
+| 加一種介面語言 | `I18N` 加一組、`detectLanguage`、`plugin.json` 的 `language` 選項 |
 | 改觸發條件 | `checkTrigger` |
 | 加 lane 欄位 | `loadLanes`（驗證）、`laneStanding`、`ui.render` 的 lane 子頁 |
 | 加記憶欄位 | `parseMemory`、記憶分頁的渲染 |

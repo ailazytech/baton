@@ -24,7 +24,7 @@ baton is a Claude Code hooks plugin (the plugin's `hooks/hooks.json` points at o
 
 Top to bottom:
 
-1. **Constants**: cache TTLs (`CACHE_TTLS`), handoff lead time (`LEAD_MS` = 5 min), minimum context (`MIN_CONTEXT_PERCENT` = 20), lane state order and look (`LANE_ORDER`, `LANE_LOOK`), memory layers (`LAYERS`)
+1. **Constants**: cache TTLs (`CACHE_TTLS`), handoff lead time (`LEAD_MS` = 5 min), minimum context (`MIN_CONTEXT_PERCENT` = 20), lane state order and look (`LANE_ORDER`, `LANE_LOOK`), memory layers (`LAYERS`), all UI and prompt text (`I18N`)
 2. **Module-level state**: `let` variables (UI, run state, herdr, lanes, memory, handoff, `phase`). One copy of state per session
 3. **Helpers**: path expansion (`expandPath`, `resolvePaths`), memory parsing (`parseMemory`), lanes (`loadLanes`, `laneStanding`, …), herdr (`parseHerdr`, `refreshHerdr`), handoff (`briefing`, `handoffPrompt`, `startHandoff`, `runCompact`, `checkTrigger`)
 4. **`register(on, options)`** registers hooks:
@@ -38,7 +38,7 @@ Top to bottom:
 
 ### Handoff state machine
 
-`phase`: `idle` → `handoff` (the `[自動交接]` instruction was sent) → `compacting` → `idle`.
+`phase`: `idle` → `handoff` (the handoff instruction was sent, prefixed with the current language's `handoffPrefix`) → `compacting` → `idle`.
 
 - `checkTrigger` runs every second and calls `startHandoff` only if all hold: `activated` (session ran `/board`), `auto`, `armed` (re-armed only after new user activity), `cacheTtl === '1h'`, 0–5 minutes remaining, user not away longer than `away_hours`, context ≥ 20%
 - Only the turn whose `turn.start` text contains `HANDOFF_PREFIX` counts as the handoff turn (the engine prefixes plugin messages, so use `includes`, not `startsWith`)
@@ -47,7 +47,8 @@ Top to bottom:
 
 ## Conventions
 
-- **Language**: code comments, UI strings and test names are in Traditional Chinese (Taiwan). When UI text or behavior changes, update both `README.md` and `README.en.md`
+- **UI language**: everything the user sees (board, toasts, command descriptions) and everything sent to Claude (briefing, handoff and compaction instructions) lives in `I18N` and is read through `T.xxx`; never hard-code strings. Every new entry needs both `zh-TW` and `en`. The language is chosen in `session.start` by `detectLanguage`
+- **Docs**: when UI text or behavior changes, update both `README.md` and `README.en.md`. Code comments and test names are currently in Traditional Chinese
 - **Style**: 2-space indent, single quotes, no semicolons, trailing commas; match the surrounding code
 - **Comments**: explain *why*, especially engine constraints (e.g. "can't call prompt.submit inside command.run")
 - **Paths**: always normalized to `/`; compare with `samePath` (case-insensitive). New features must handle macOS (`HOME`) and Windows (`USERPROFILE`, drive letters)
@@ -78,8 +79,9 @@ claude plugin test
 
 | Task | Look at |
 | --- | --- |
-| Change the handoff instruction | `handoffPrompt`, `compactInstructions` |
-| Change what new sessions are told | `briefing`, `laneBriefing` |
+| Change the handoff instruction | `handoffHead`, `handoffLane`, `handoffDocSteps`, `compactLane`, `compactDoc` in `I18N` |
+| Change what new sessions are told | `briefing`, `laneBriefing` in `I18N` |
+| Add a UI language | a new set in `I18N`, `detectLanguage`, the `language` options in `plugin.json` |
 | Change trigger conditions | `checkTrigger` |
 | Add a lane field | `loadLanes` (validation), `laneStanding`, the lane page in `ui.render` |
 | Add a memory field | `parseMemory`, Memory tab rendering |
