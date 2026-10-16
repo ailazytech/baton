@@ -1,0 +1,12 @@
+{
+  "name": "session-board",
+  "owner": { "name": "ailazytech" },
+  "description": "session-board: a work board plugin for Claude Code",
+  "plugins": [
+    {
+      "name": "session-board",
+      "source": "./",
+      "description": "Side-panel work board for Claude Code: auto handoff + compaction before the prompt cache expires, lanes, layered memory"
+    }
+  ]
+}

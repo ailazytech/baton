@@ -1,0 +1,48 @@
+{
+  "name": "session-board",
+  "version": "0.4.1",
+  "description": "側邊工作看板：lane 任務一覽與子頁、分層記憶、提示快取倒數，快取將過期時自動交接並壓縮",
+  "author": { "name": "ailazytech" },
+  "license": "MIT",
+  "repository": "https://github.com/ailazytech/session-board",
+  "userConfig": {
+    "memory_dir": {
+      "type": "string",
+      "title": "記憶資料夾",
+      "description": "記憶分頁讀取的資料夾。可用 {config}（~/.claude）、{project}（專案代號）、{root}（專案根目錄）、~；相對路徑以專案根目錄為準",
+      "default": "{config}/projects/{project}/memory"
+    },
+    "handoff_path": {
+      "type": "string",
+      "title": "交接文件",
+      "description": "自動交接寫入、進度分頁顯示的檔案。可用 {config}、{project}、{root}、~；相對路徑以專案根目錄為準。個別專案可用 {config}/projects/{project}/session-board.json 覆寫（handoff_path、handoff_section、compact_path、memory_dir）",
+      "default": "docs/HANDOFF.md"
+    },
+    "brief_on_start": {
+      "type": "boolean",
+      "title": "自動接續交接文件",
+      "description": "新 session 或壓縮後的第一個 prompt，自動附上交接機制說明與交接文件內容給 Claude",
+      "default": true
+    },
+    "launcher_button": {
+      "type": "boolean",
+      "title": "輸入框上方的看板按鈕",
+      "description": "看板關著時，在輸入框上方顯示一顆「◧ 工作看板」按鈕，點了打開看板",
+      "default": true
+    },
+    "cache_ttl": {
+      "type": "string",
+      "title": "提示快取時效",
+      "description": "倒數依據；用量超額時引擎會降為 5m，此時不自動交接。切換模型時以引擎告知的值為準",
+      "options": ["1h", "5m"],
+      "default": "1h"
+    },
+    "away_hours": {
+      "type": "string",
+      "title": "離開多久後不再自動交接（小時）",
+      "description": "最後一次輸入超過這麼久，快取到期前就不再自動交接（避免人不在時花一輪＋壓縮）",
+      "options": ["24", "8", "2"],
+      "default": "24"
+    }
+  }
+}
