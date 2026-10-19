@@ -3,6 +3,13 @@
 // 分頁「進度／交接」：執行狀態、任務清單、上下文用量、交接文件
 // 分頁「記憶」：本專案的記憶檔，依 layer 分層（使用者／專案／工作線／階段）
 // 底部：提示快取倒數；快取快過期時自動寫交接（狀態檔或交接文件），寫完後觸發壓縮
+// 防呆提醒（nudges.js）：同樣的失敗連續兩次、說完成了卻沒驗證、回覆語言跑掉時，給 Claude 一句提醒
+// 自動整理筆記（notes.js）：每 N 則使用者訊息、交接前或 /distill 時，用便宜的模型把使用者的要求與糾正寫進記憶資料夾；講 3 次以上請 Claude 放進專案
+// 守門（guards.js）：寫成文字還一再被違反的要求，起草成工具呼叫前的比對，使用者同意才生效
+
+import { briefOf, doneCheck, freshReply, freshWork, noteCall, noteStep, replyLangOfSetting, takeNext, takePending, trackFailure } from './nudges.js'
+import { ACTIONS_END, ACTIONS_START, ASSISTANT_MAX, PROMOTE_COUNT, USER_MAX, indexLine, newMemoryFile, parseActions, promoteCandidates, setMeta, squash } from './notes.js'
+import { GUARDS_END, GUARDS_START, GUARD_ASK_ITEMS, GUARD_MIN_COUNT, PATTERN_MAX, applyGuardChange, findGuardHit, guardCandidates, parseGuards, withProposals } from './guards.js'
 
 const PANE = 'baton'
 
@@ -25,6 +32,10 @@ const DEFAULT_HANDOFF_PATH = 'docs/HANDOFF.md'
 const PROJECT_SETTINGS = '{config}/projects/{project}/baton.json'
 // 改名前（session-board）的覆寫檔：沒有 baton.json 時退回讀這個，舊專案不用搬
 const LEGACY_PROJECT_SETTINGS = '{config}/projects/{project}/session-board.json'
+// 守門（不放進專案 repo）：[{ id, rule, tool, match, unless?, mode, message, state, bad, good, at }]
+const GUARDS_FILE = '{config}/projects/{project}/baton-guards.json'
+// 整理筆記的對話紀錄最多留幾則（整理失敗一直重試時不會無限長大）
+const TALK_MAX = 400
 
 // lane 狀態檔（tasks_dir 底下每條 lane 一個 <lane>.json）；順序＝顯示順序，要人處理的在前
 const LANE_ORDER = ['blocked', 'failed', 'review', 'working', 'idle', 'done']
@@ -244,6 +255,128 @@ const I18N = {
     ],
     compactLane: (dir) => '保留 ' + dir + ' 的 lane 狀態檔所指的進度、等待使用者決定的事與下一步；壓縮後以狀態檔為準繼續工作。',
     compactDoc: (file, section) => '保留 ' + file + (section ? ' 的「' + section + '」一節' : '') + ' 的重點、目前任務狀態與下一步；壓縮後以交接文件為準繼續工作。',
+    // 防呆提醒（給 Claude，使用者看不到）
+    retryNudge: (tool, brief) =>
+      '[baton] 這個工具（' + tool + '）連續兩次因同樣原因失敗（' + (brief || '沒有錯誤文字') + '）。錯誤看起來是暫時性的（逾時、還在載入、連線中斷）就稍等再試一次；不是的話先找出原因並換一個做法，不要原樣重試。',
+    doneCheck: {
+      unverified: '[baton] 你說完成了，但這一輪改了檔案之後沒有跑任何測試或檢查。請跑和這次改動相關的測試或檢查，在回覆附上跑了什麼、結果如何；沒辦法驗證的，說明哪些沒驗證、為什麼，不要說完成。',
+      failed: '[baton] 你說完成了，但這一輪改檔後的測試或檢查沒有通過。請修好問題並重新跑過測試或檢查，在回覆附上結果；若無法修好或與這次改動無關，請在回覆誠實說明失敗原因，不要直接說完成。',
+    },
+    // 自動整理筆記
+    cmdDistill: '立即整理筆記：把上次整理之後你的要求與糾正寫進記憶資料夾',
+    distillWhy: { manual: '手動', handoff: '交接前', every: (n) => '每 ' + n + ' 則訊息' },
+    distillOff: '自動整理筆記已關閉（/config 的 distill）',
+    distillBusy: '正在整理筆記',
+    distillStarted: (n) => '開始整理筆記（' + n + ' 則新訊息）',
+    distillNothing: '上次整理之後沒有新的對話',
+    distillRunning: (why) => '整理筆記中（' + why + '）',
+    distillDone: (added, confirmed) => '筆記整理完：新增 ' + added + '、加次數 ' + confirmed,
+    distillFail: (err) => '整理筆記失敗：' + err,
+    memoryDirMissing: (dir) => '記憶資料夾不存在：' + dir,
+    modelNoReply: (reason) => '模型沒有回應：' + reason,
+    distilling: '整理筆記中…',
+    neverDistilled: '還沒整理過',
+    lastDistill: (at, why, d) => '上次整理 ' + at + '（' + why + '）：新增 ' + d.added.length + '、加次數 ' + d.confirmed.length + (d.rejected.length ? '、丟掉 ' + d.rejected.length : ''),
+    lastDistillFail: (at, why, err) => '上次整理 ' + at + '（' + why + '）：失敗 ' + err,
+    untilNext: (n) => ' · 再 ' + n + ' 則自動整理',
+    distillNow: '立即整理',
+    countTag: (n) => ' ×' + n,
+    promotedTag: ' ✓專案',
+    distillPrompt: (memories, talk) =>
+      [
+        '你在背景整理一段 Claude Code 對話，目標是讓使用者不用把同樣的要求講第二次。你沒有工具，只輸出指定格式，由程式寫檔。',
+        '用使用者在對話裡使用的語言撰寫（使用者寫中文就用繁體中文（台灣））；程式碼、指令、路徑與專有名詞維持原文。',
+        '',
+        '只記使用者自己說出的這兩類：',
+        '- feedback：使用者對做事方式的要求、偏好與糾正（例如「不要自己 commit」「表單用多選」）',
+        '- user：使用者自己的背景（角色、熟悉的技術、工作習慣）',
+        '不記：專案的事實與進度、只跟眼前這件工作有關的一次性指示、Claude 自己的推論與說明、使用者只回「好」「可以」的事。',
+        '',
+        '動作（每行一個 JSON）：',
+        '- 使用者又講了一次現有記憶的內容，或又糾正了同一件事：{"op":"confirm","name":"<現有記憶的 name>","quote":"<使用者原話>"}',
+        '- 新的、之後的對話也用得到的：{"op":"add","name":"<英數小寫與連字號>","title":"<簡短標題>","type":"feedback|user","layer":"user|project","description":"<一行摘要>","body":"<規則本身>\\n\\n**Why:** <理由>\\n**How to apply:** <什麼時候、怎麼做>","quote":"<使用者原話>"}',
+        '- layer：user＝跨專案都適用的個人偏好；project＝只適用這個專案',
+        '- quote 必須從【使用者】的訊息逐字複製一小段（程式會比對，對不上的會被丟掉）',
+        '- 同一件事已經有現有記憶就用 confirm，不要 add 重複的；同一則記憶這次最多 confirm 一次',
+        '',
+        '輸出：在 ' + ACTIONS_START + ' 與 ' + ACTIONS_END + ' 之間，每行一個 JSON；沒有要做的就兩行標記之間留空。',
+        '',
+        '=== 現有記憶 ===',
+        ...(memories.length
+          ? memories.map((m) => '- ' + m.name + '｜' + m.type + (m.layer ? '／' + m.layer : '') + '｜講過 ' + m.count + ' 次｜' + clip(squash(m.description || m.body), 120))
+          : ['（無）']),
+        '',
+        '=== 對話 ===',
+        ...talk.map((t) => (t.role === 'user' ? '【使用者】' + clip(t.text, USER_MAX) : '【Claude】' + clip(squash(t.text), ASSISTANT_MAX))),
+      ].join('\n'),
+    promote: (items, dir) =>
+      [
+        '[baton] 下面這些要求使用者已經講了 ' + PROMOTE_COUNT + ' 次以上，寫在記憶裡還不夠。先做完使用者這次交代的事，再處理；使用者在處理緊急問題時先不要做。',
+        '- layer 是 project 的：放進專案放規則的地方（CLAUDE.md、AGENTS.md 或現有的 hook），先檢查是否已經寫過、不要 commit，用一句話告訴使用者加了什麼、放在哪。',
+        '- layer 是 user 的：先問使用者要不要加進全域的 ~/.claude/CLAUDE.md，使用者說好才加。',
+        '- 放好後在那則記憶檔的 metadata 加上 `promoted: <放的檔案路徑>` 和 `promoted_count: <當時的 count>`；使用者說不要放就加 `promoted: declined`。',
+        ...items.map((m) => '- ' + m.name + '（' + (m.layer || 'project') + '，講過 ' + m.count + ' 次）：' + m.description + '｜' + dir + '/' + m.file),
+      ].join('\n'),
+    // 守門
+    cmdGuard: '守門：list｜suggest｜on N｜off N｜drop N｜mode N deny|remind',
+    guardUsage: '用法：/guard [list|suggest|on N|off N|drop N|mode N deny|remind]',
+    guardsReadFail: (err) => '讀取守門失敗：' + err,
+    guardBusy: '正在起草守門',
+    guardNoCandidates: '目前沒有需要起草守門的規則',
+    guardNoneFit: (n) => '沒有適合寫成守門的規則' + (n ? '（丟掉 ' + n + ' 條）' : ''),
+    guardDrafted: (n) => '起草了 ' + n + ' 條守門，下一段對話會請 Claude 問你要不要採用',
+    guardDraftFail: (err) => '起草守門失敗：' + err,
+    guardDenyToast: (id, tool, rule) => '守門 #' + id + ' 擋下 ' + tool + '（' + rule + '）',
+    guardHead: (g) => '[baton] 守門 #' + g.id + '（規則「' + g.rule + '」）：' + g.message,
+    guardDenyHint: (id) => '使用者核准過這條守門；確定要做就請使用者自己執行，或請使用者用 /guard off ' + id + ' 停用。',
+    guardSummary: (on, proposed, off) => '守門：啟用 ' + on + '、待問 ' + proposed + '、停用 ' + off + '（/guard 查看）',
+    guardNone: (n) => '還沒有守門。同一個要求放進專案後又被糾正，或你不讓它放進專案、卻講了 ' + n + ' 次，整理筆記後會起草；也可以打 /guard suggest。',
+    guardList: (guards, hits) => {
+      const state = { proposed: '待問', on: '啟用', off: '停用' }
+      return guards
+        .flatMap((g) => [
+          '#' + g.id + ' ' + (state[g.state] ?? g.state) + '・' + (g.mode === 'deny' ? '擋下' : '提醒') + '・' + g.rule + (hits[g.id] ? '（命中 ' + hits[g.id] + ' 次）' : ''),
+          '   ' + g.tool + ' 符合 /' + g.match + '/' + (g.unless ? '，除非 /' + g.unless + '/' : ''),
+          '   → ' + g.message,
+        ])
+        .join('\n')
+    },
+    guardAsk: (drafts, file) =>
+      [
+        '[baton] 下面這些要求已經寫成文字，AI 還是一再違反，baton 起草了守門：在 AI 呼叫工具之前比對參數，違規時提醒或擋下。先做完使用者這次交代的事，再在回覆最後用一兩句白話問使用者要不要採用：說明它在什麼情況會出現、會做什麼。使用者正在處理緊急問題就不要問；沒回應就不要追問。',
+        ...drafts.map(
+          (g) =>
+            '- 守門 #' + g.id + '（' + (g.mode === 'deny' ? '擋下' : '提醒') + '）：規則「' + g.rule + '」｜工具 ' + g.tool + ' 符合 /' + g.match + '/' + (g.unless ? '，除非 /' + g.unless + '/' : '') + ' 時，告訴 AI：' + g.message,
+        ),
+        '使用者說要：把 ' + file + ' 裡那一條的 "state" 改成 "on"（想改成只提醒或擋下就改 "mode"）；說不要：改成 "off"。',
+      ].join('\n'),
+    guardPrompt: (rules, tools) =>
+      [
+        '你替一個 Claude Code 工作區設計「守門」：在 AI 呼叫工具之前，用正規表達式比對工具參數，攔下違反規則的呼叫。',
+        '下面是使用者反覆糾正、寫成文字還是一再被違反的規則。逐條判斷：違規時，工具參數裡有沒有明確、可比對的特徵？',
+        '',
+        '只在這些情況提出守門：',
+        '- 違規一定經過某個工具，參數有明確特徵（指令、工具名稱、路徑）',
+        '- 有 unless 可以排除照規則做的正確寫法',
+        '不要提出：規則講的是回答裡的說法、判斷順序、寫作內容，或特徵太模糊會擋到正常工作的。',
+        '',
+        '比對方式：',
+        '- tool：工具名稱原樣，例如 Bash、Edit、mcp__x__y；結尾 * 表示前綴',
+        '- 比對文字：工具參數的字串值以換行串起來（Bash 就是 command 本身）；不分大小寫的 JavaScript 正規表達式',
+        '- match／unless 各不超過 ' + PATTERN_MAX + ' 字；寧可窄、不要寬',
+        '- 特殊字元要跳脫：. 寫 \\.；寫進 JSON 時每個反斜線再寫成 \\\\',
+        '- bad：一段違規的比對文字範例（要被 match 命中、不被 unless 排除）；good：一段照規則做、也用同一個工具的正確範例（不能被擋）。程式會實際比對，不符就丟掉',
+        '- mode：deny（執行前擋下）只用在不可逆或代價高的錯誤；其他用 remind（照常執行，之後提醒）',
+        '- message：給 AI 看的一句話，說該改成怎麼做',
+        '',
+        '這個工作區最近用過的工具：' + (tools.length ? tools.join(', ') : '（無紀錄）'),
+        '',
+        '輸出：在 ' + GUARDS_START + ' 與 ' + GUARDS_END + ' 之間，每行一個 JSON，每條規則最多一個；沒有適合的就兩行標記之間留空。',
+        '{"rule":"<規則 name，原樣>","tool":"Bash","match":"<regex>","unless":"<regex，可省略>","mode":"remind","message":"<一句話>","bad":"<違規範例>","good":"<正確範例>"}',
+        '',
+        '=== 規則 ===',
+        ...rules.flatMap((r) => ['### ' + r.name + '（講過 ' + r.count + ' 次）', r.description, r.body]),
+      ].join('\n'),
   },
   en: {
     handoffPrefix: '[auto-handoff]',
@@ -419,6 +552,128 @@ const I18N = {
     ],
     compactLane: (dir) => 'Keep the progress, decisions waiting on the user and next steps referenced by the lane status files in ' + dir + '; after compaction, continue from the status files.',
     compactDoc: (file, section) => 'Keep the key points of ' + file + (section ? ', section "' + section + '"' : '') + ', the current task state and next steps; after compaction, continue from the handoff document.',
+    // Nudges (for Claude; the user doesn't see them)
+    retryNudge: (tool, brief) =>
+      '[baton] This tool (' + tool + ') failed twice in a row for the same reason (' + (brief || 'no error text') + "). If the error looks transient (timeout, still loading, dropped connection), wait a moment and try once more; otherwise find the cause and change approach instead of retrying as is.",
+    doneCheck: {
+      unverified: "[baton] You said it's done, but no test or check ran after you edited files this turn. Run the tests or checks relevant to this change and include what you ran and the result in your reply; if something can't be verified, say what wasn't verified and why instead of saying it's done.",
+      failed: "[baton] You said it's done, but the tests or checks after your edits this turn did not pass. Fix the problem and run them again, including the result in your reply; if it can't be fixed or is unrelated to this change, explain the failure honestly instead of saying it's done.",
+    },
+    // Notes
+    cmdDistill: 'Update notes now: write your requests and corrections since the last pass into the memory folder',
+    distillWhy: { manual: 'manual', handoff: 'before handoff', every: (n) => 'every ' + n + ' messages' },
+    distillOff: 'Notes are off (distill in /config)',
+    distillBusy: 'Already updating notes',
+    distillStarted: (n) => 'Updating notes (' + n + ' new messages)',
+    distillNothing: 'No new conversation since the last pass',
+    distillRunning: (why) => 'Updating notes (' + why + ')',
+    distillDone: (added, confirmed) => 'Notes updated: ' + added + ' added, ' + confirmed + ' counted again',
+    distillFail: (err) => 'Updating notes failed: ' + err,
+    memoryDirMissing: (dir) => 'Memory folder not found: ' + dir,
+    modelNoReply: (reason) => 'No reply from the model: ' + reason,
+    distilling: 'Updating notes…',
+    neverDistilled: 'Not updated yet',
+    lastDistill: (at, why, d) => 'Last pass ' + at + ' (' + why + '): ' + d.added.length + ' added, ' + d.confirmed.length + ' counted again' + (d.rejected.length ? ', ' + d.rejected.length + ' dropped' : ''),
+    lastDistillFail: (at, why, err) => 'Last pass ' + at + ' (' + why + '): failed ' + err,
+    untilNext: (n) => ' · next in ' + n + ' messages',
+    distillNow: 'Update now',
+    countTag: (n) => ' ×' + n,
+    promotedTag: ' ✓project',
+    distillPrompt: (memories, talk) =>
+      [
+        "You are tidying up a Claude Code conversation in the background so the user never has to repeat the same request. You have no tools; output only the format below and a program writes the files.",
+        "Write in the language the user uses in the conversation; keep code, commands, paths and proper nouns as they are.",
+        '',
+        'Record only these two kinds, as said by the user themselves:',
+        "- feedback: the user's requests, preferences and corrections about how to work (e.g. \"don't commit on your own\", \"use multi-select in forms\")",
+        "- user: the user's own background (role, familiar tech, work habits)",
+        'Do not record: project facts and progress, one-off instructions for the task at hand, Claude\'s own reasoning and explanations, things the user only answered "ok" to.',
+        '',
+        'Actions (one JSON per line):',
+        '- The user said the same thing as an existing memory again, or corrected the same thing again: {"op":"confirm","name":"<existing memory name>","quote":"<the user\'s exact words>"}',
+        '- Something new that later conversations will also need: {"op":"add","name":"<lowercase letters, digits and hyphens>","title":"<short title>","type":"feedback|user","layer":"user|project","description":"<one-line summary>","body":"<the rule itself>\\n\\n**Why:** <reason>\\n**How to apply:** <when and how>","quote":"<the user\'s exact words>"}',
+        '- layer: user = a personal preference that applies across projects; project = applies only to this project',
+        '- quote must be copied verbatim from a [User] message (the program checks; anything that does not match is dropped)',
+        '- If an existing memory already covers it, use confirm instead of adding a duplicate; confirm each memory at most once per pass',
+        '',
+        'Output: one JSON per line between ' + ACTIONS_START + ' and ' + ACTIONS_END + '; leave nothing between the two markers if there is nothing to do.',
+        '',
+        '=== Existing memories ===',
+        ...(memories.length
+          ? memories.map((m) => '- ' + m.name + ' | ' + m.type + (m.layer ? '/' + m.layer : '') + ' | said ' + m.count + ' times | ' + clip(squash(m.description || m.body), 120))
+          : ['(none)']),
+        '',
+        '=== Conversation ===',
+        ...talk.map((t) => (t.role === 'user' ? '[User] ' + clip(t.text, USER_MAX) : '[Claude] ' + clip(squash(t.text), ASSISTANT_MAX))),
+      ].join('\n'),
+    promote: (items, dir) =>
+      [
+        "[baton] The user has said each of these " + PROMOTE_COUNT + "+ times; keeping them in memory isn't enough. Finish what the user asked for this time first, then handle them; skip this while the user is dealing with something urgent.",
+        "- layer project: put it where the project keeps its rules (CLAUDE.md, AGENTS.md or an existing hook); check it isn't already there, don't commit, and tell the user in one sentence what you added and where.",
+        '- layer user: ask the user first whether to add it to the global ~/.claude/CLAUDE.md, and add it only if they agree.',
+        "- Once placed, add `promoted: <file path>` and `promoted_count: <count at that time>` to that memory file's metadata; if the user doesn't want it placed, add `promoted: declined`.",
+        ...items.map((m) => '- ' + m.name + ' (' + (m.layer || 'project') + ', said ' + m.count + ' times): ' + m.description + ' | ' + dir + '/' + m.file),
+      ].join('\n'),
+    // Guards
+    cmdGuard: 'Guards: list | suggest | on N | off N | drop N | mode N deny|remind',
+    guardUsage: 'Usage: /guard [list|suggest|on N|off N|drop N|mode N deny|remind]',
+    guardsReadFail: (err) => 'Could not read guards: ' + err,
+    guardBusy: 'Already drafting guards',
+    guardNoCandidates: 'No rules need a guard right now',
+    guardNoneFit: (n) => 'No rule fits a guard' + (n ? ' (' + n + ' dropped)' : ''),
+    guardDrafted: (n) => 'Drafted ' + n + ' guard(s); the next conversation will ask you whether to adopt them',
+    guardDraftFail: (err) => 'Drafting guards failed: ' + err,
+    guardDenyToast: (id, tool, rule) => 'Guard #' + id + ' blocked ' + tool + ' (' + rule + ')',
+    guardHead: (g) => '[baton] Guard #' + g.id + ' (rule "' + g.rule + '"): ' + g.message,
+    guardDenyHint: (id) => 'The user approved this guard; if it really needs doing, ask the user to run it themselves, or to disable the guard with /guard off ' + id + '.',
+    guardSummary: (on, proposed, off) => 'Guards: ' + on + ' on, ' + proposed + ' to ask, ' + off + ' off (/guard to see)',
+    guardNone: (n) => "No guards yet. They're drafted after a notes pass when a request placed in the project is corrected again, or one you kept out of the project has been said " + n + ' times; or run /guard suggest.',
+    guardList: (guards, hits) => {
+      const state = { proposed: 'to ask', on: 'on', off: 'off' }
+      return guards
+        .flatMap((g) => [
+          '#' + g.id + ' ' + (state[g.state] ?? g.state) + ' · ' + (g.mode === 'deny' ? 'block' : 'remind') + ' · ' + g.rule + (hits[g.id] ? ' (hit ' + hits[g.id] + ' times)' : ''),
+          '   ' + g.tool + ' matching /' + g.match + '/' + (g.unless ? ', unless /' + g.unless + '/' : ''),
+          '   → ' + g.message,
+        ])
+        .join('\n')
+    },
+    guardAsk: (drafts, file) =>
+      [
+        '[baton] These requests are already written down, yet the AI keeps breaking them, so baton drafted guards: before the AI calls a tool, its arguments are matched and a violation gets a reminder or is blocked. Finish what the user asked for this time first, then at the end of your reply ask in a sentence or two whether to adopt them: say when each would fire and what it would do. Skip this while the user is dealing with something urgent; if they don\'t answer, don\'t ask again.',
+        ...drafts.map(
+          (g) =>
+            '- Guard #' + g.id + ' (' + (g.mode === 'deny' ? 'block' : 'remind') + '): rule "' + g.rule + '" | when tool ' + g.tool + ' matches /' + g.match + '/' + (g.unless ? ', unless /' + g.unless + '/' : '') + ', tell the AI: ' + g.message,
+        ),
+        'If the user says yes: set that entry\'s "state" to "on" in ' + file + ' (change "mode" to switch between remind and block); if no: set it to "off".',
+      ].join('\n'),
+    guardPrompt: (rules, tools) =>
+      [
+        'You design "guards" for a Claude Code workspace: before the AI calls a tool, a regular expression is matched against the tool arguments to catch calls that break a rule.',
+        'Below are rules the user corrected repeatedly that keep being broken even though they are written down. For each, decide: when it is broken, do the tool arguments have a clear, matchable feature?',
+        '',
+        'Propose a guard only when:',
+        '- breaking the rule always goes through some tool, with a clear feature in the arguments (command, tool name, path)',
+        '- an unless pattern can exclude the correct way of doing it',
+        'Do not propose: rules about what the answer says, the order of judgment, writing content, or features so vague they would block normal work.',
+        '',
+        'Matching:',
+        '- tool: the tool name as is, e.g. Bash, Edit, mcp__x__y; a trailing * means prefix',
+        '- matched text: the string values of the tool arguments joined by newlines (for Bash, the command itself); case-insensitive JavaScript regular expressions',
+        '- match / unless at most ' + PATTERN_MAX + ' characters each; prefer narrow to broad',
+        '- escape special characters: write . as \\.; inside JSON write each backslash as \\\\',
+        '- bad: an example of matched text that breaks the rule (must be hit by match and not excluded by unless); good: a correct example that follows the rule with the same tool (must not be caught). The program checks both and drops guards that fail',
+        '- mode: deny (block before running) only for irreversible or costly mistakes; otherwise remind (run as usual, then remind)',
+        '- message: one sentence for the AI saying what to do instead',
+        '',
+        'Tools used recently in this workspace: ' + (tools.length ? tools.join(', ') : '(none recorded)'),
+        '',
+        'Output: one JSON per line between ' + GUARDS_START + ' and ' + GUARDS_END + ', at most one per rule; leave nothing between the markers if none fit.',
+        '{"rule":"<rule name, as is>","tool":"Bash","match":"<regex>","unless":"<regex, optional>","mode":"remind","message":"<one sentence>","bad":"<violating example>","good":"<correct example>"}',
+        '',
+        '=== Rules ===',
+        ...rules.flatMap((r) => ['### ' + r.name + ' (said ' + r.count + ' times)', r.description, r.body]),
+      ].join('\n'),
   },
 }
 // 任何語言的交接前綴都認（切換語言前送出的交接指示也要能辨識）
@@ -516,6 +771,30 @@ let handoffSentAt = 0
 let compactTries = 0
 let note = ''
 
+// 防呆提醒（熱重載會清掉；清掉只是少一次提醒）
+let retryNudge = true
+let doneCheckOn = true
+let replyLanguage = 'auto' // auto＝跟著 Claude Code 的 language 設定；off；或 zh-TW／zh-CN／en／ja
+let replyTarget // 目標語言；undefined＝不提醒
+let streaks = new Map()
+let work = freshWork()
+let reply = freshReply()
+
+// 自動整理筆記
+let distillOn = true
+let distillEvery = 30
+let notesModel = 'sonnet'
+let talk = { items: [], humans: 0 } // 上次整理之後的對話：使用者親手打的訊息與 Claude 的回答
+let distilling = false
+let lastDistill = null // { at, why, added: [], confirmed: [], rejected: [], error }
+
+// 守門
+let guardsFile = ''
+let guards = []
+let guardHitCounts = {} // id → 命中次數
+let drafting = false
+let toolsSeen = new Set() // 這個 session 用過的工具名稱，起草守門時給模型參考
+
 function pad(n) {
   return String(n).padStart(2, '0')
 }
@@ -562,6 +841,11 @@ function parseMemory(file, raw) {
     layer: field('layer'),
     lane: field('lane'),
     reviewBy: field('review_by'),
+    // 整理筆記記下的：使用者講過幾次、最後一次是哪天、放進專案了沒（路徑或 declined）與當時的次數
+    count: Number(field('count')) || 1,
+    lastSeen: field('last_seen'),
+    promoted: unquote(field('promoted')),
+    promotedCount: Number(field('promoted_count')) || 0,
     body: (m ? m[2] : text).trim(),
   }
 }
@@ -635,6 +919,7 @@ async function resolvePaths($) {
   compactFile = projectSettings.compact_path ? await expandPath($, projectSettings.compact_path) : defaultCompact
   tasksDir = pick('tasks_dir', '') ? await expandPath($, projectSettings.tasks_dir) : ''
   selfLane = pick('tasks_self', 'architect').trim()
+  guardsFile = await expandPath($, GUARDS_FILE)
 }
 
 function laneProgress(l) {
@@ -1041,6 +1326,8 @@ async function startHandoff($, remainingMs) {
   phase = 'handoff'
   handoffTurnId = ''
   handoffSentAt = await $.clock.now()
+  // 交接前把還沒整理的對話整理掉（另一個請求，不佔主對話；失敗下次再整理）
+  if (distillOn && talk.humans > 0) void distill($, T.distillWhy.handoff)
   note = T.handoffSent
   $.ui.toast(T.handoffToast)
   $.ui.invalidate('ui.render')
@@ -1142,6 +1429,185 @@ async function refreshUsage($) {
   }
 }
 
+// ---------- 自動整理筆記 ----------
+
+// 對話紀錄依專案存，換 session（/clear、重開）後沒整理到的部分下次接著整理
+async function talkKey($) {
+  return 'talk:' + (await $.session.root()).replace(/[^A-Za-z0-9]/g, '-')
+}
+
+async function loadTalk($) {
+  const saved = await $.store.get(await talkKey($))
+  if (saved && Array.isArray(saved.items)) talk = { items: saved.items, humans: Number(saved.humans) || 0 }
+  const last = await $.store.get('distill-last')
+  if (last && typeof last === 'object') lastDistill = last
+}
+
+async function saveTalk($) {
+  await $.store.set(await talkKey($), talk)
+}
+
+async function recordTalk($, role, text) {
+  const value = String(text ?? '').trim()
+  if (!value) return
+  const items = [...talk.items, { role, text: value }]
+  talk = { items: items.length > TALK_MAX ? items.slice(-TALK_MAX) : items, humans: talk.humans + (role === 'user' ? 1 : 0) }
+  await saveTalk($)
+}
+
+// 把上次整理之後的對話交給整理模型，寫進記憶資料夾。失敗時對話留著，下次再整理
+async function distill($, why) {
+  if (distilling || !distillOn) return
+  const items = talk.items
+  const userTexts = items.filter((t) => t.role === 'user').map((t) => t.text)
+  if (!userTexts.length) {
+    if (why === T.distillWhy.manual) $.ui.toast(T.distillNothing)
+    return
+  }
+  distilling = true
+  note = T.distillRunning(why)
+  $.ui.invalidate('ui.render')
+  const now = await $.clock.now()
+  const today = new Date(now).toISOString().slice(0, 10)
+  const result = { at: now, why, added: [], confirmed: [], rejected: [], error: '' }
+  try {
+    await loadMemories($)
+    if (!(await $.fs.exists(memoryDir))) throw new Error(T.memoryDirMissing(memoryDir))
+    const r = await $.model.complete({
+      model: notesModel,
+      prompt: T.distillPrompt(memories, items),
+      effort: 'low',
+      maxTokens: 4000,
+      timeoutMs: 180000,
+    })
+    if (!r.isAnswered) throw new Error(T.modelNoReply(r.reason + (r.error ? ' ' + r.error : '')))
+    const byName = new Map(memories.map((m) => [m.name, m]))
+    const { adds, confirms, rejected } = parseActions(r.text, new Set(byName.keys()), userTexts)
+    result.rejected = rejected
+    for (const c of confirms) {
+      const m = byName.get(c.name)
+      const path = memoryDir + '/' + m.file
+      await $.fs.write(path, setMeta(await $.fs.read(path), { count: m.count + 1, last_seen: today }))
+      result.confirmed.push(c.name)
+    }
+    if (adds.length) {
+      for (const a of adds) await $.fs.write(memoryDir + '/' + a.name + '.md', newMemoryFile(a, today))
+      const indexPath = memoryDir + '/MEMORY.md'
+      const index = (await $.fs.exists(indexPath)) ? await $.fs.read(indexPath) : ''
+      const lines = adds.map(indexLine).join('\n')
+      await $.fs.write(indexPath, index.trim() ? index.replace(/\s*$/, '\n') + lines + '\n' : lines + '\n')
+      result.added = adds.map((a) => a.name)
+    }
+    // 整理過的部分丟掉；整理期間新增的留著
+    const rest = talk.items.slice(items.length)
+    talk = { items: rest, humans: rest.filter((t) => t.role === 'user').length }
+    await saveTalk($)
+    await loadMemories($)
+    note = T.distillDone(result.added.length, result.confirmed.length)
+    // 次數變多了：看看有沒有寫成文字還擋不住、該起草守門的
+    if (result.confirmed.length) $.clock.after(0, () => draftGuards($, false))
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err)
+    note = T.distillFail(result.error)
+  } finally {
+    distilling = false
+    lastDistill = result
+    await $.store.set('distill-last', result)
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// ---------- 守門 ----------
+
+async function loadGuards($) {
+  try {
+    if (!guardsFile) await resolvePaths($)
+    if (!(await $.fs.exists(guardsFile))) {
+      guards = []
+    } else {
+      const parsed = JSON.parse(await $.fs.read(guardsFile))
+      guards = Array.isArray(parsed) ? parsed.filter((g) => g && typeof g.id === 'number' && typeof g.match === 'string') : []
+    }
+    const hits = await $.store.get('guard-hits:' + guardsFile)
+    guardHitCounts = hits && typeof hits === 'object' ? hits : {}
+  } catch (err) {
+    note = T.guardsReadFail(String(err))
+  }
+}
+
+async function saveGuards($, list) {
+  guards = list
+  await $.fs.write(guardsFile, JSON.stringify(list, null, 2) + '\n')
+  $.ui.invalidate('ui.render')
+}
+
+// 寫成文字還擋不住的要求，請模型起草守門；草稿要使用者同意才生效
+async function draftGuards($, manual) {
+  if (drafting) return T.guardBusy
+  await loadMemories($)
+  await loadGuards($)
+  const rules = guardCandidates(memories, guards)
+  if (!rules.length) return T.guardNoCandidates
+  drafting = true
+  try {
+    const r = await $.model.complete({
+      model: notesModel,
+      prompt: T.guardPrompt(rules, [...toolsSeen]),
+      effort: 'low',
+      maxTokens: 3000,
+      timeoutMs: 180000,
+    })
+    if (!r.isAnswered) throw new Error(T.modelNoReply(r.reason))
+    const { out, rejected } = parseGuards(r.text, new Set(rules.map((m) => m.name)))
+    if (!out.length) return T.guardNoneFit(rejected.length)
+    const drafts = withProposals(out, guards, await $.clock.now())
+    await saveGuards($, [...guards, ...drafts])
+    const text = T.guardDrafted(drafts.length)
+    if (!manual) $.ui.toast(text)
+    return text
+  } catch (err) {
+    return T.guardDraftFail(err instanceof Error ? err.message : String(err))
+  } finally {
+    drafting = false
+  }
+}
+
+async function recordGuardHit($, id) {
+  guardHitCounts = { ...guardHitCounts, [id]: (guardHitCounts[id] ?? 0) + 1 }
+  await $.store.set('guard-hits:' + guardsFile, guardHitCounts)
+}
+
+async function guardCommand($, args) {
+  const [action = '', idText = '', mode = ''] = String(args ?? '').trim().split(/\s+/)
+  await loadGuards($)
+  if (!action || action === 'list') return guards.length ? T.guardList(guards, guardHitCounts) : T.guardNone(GUARD_MIN_COUNT)
+  if (action === 'suggest') return await draftGuards($, true)
+  const updated = applyGuardChange(guards, action, Number(idText), mode)
+  if (!updated) return T.guardUsage
+  await saveGuards($, updated)
+  return guards.length ? T.guardList(guards, guardHitCounts) : T.guardNone(GUARD_MIN_COUNT)
+}
+
+// 工具呼叫結束後的防呆觀察（失敗一律放行原結果，絕不丟例外、不擋呼叫）：
+// 同一個工具連續兩次因同樣原因失敗，在第 2 次的結果後面附提醒；記下這一輪的改檔與驗證；帶出回覆語言提醒
+function watchCall(e, r) {
+  try {
+    if (!r || r.deny !== undefined) return r
+    const failed = r.isError === true
+    const agent = e.agentId ?? ''
+    // 只記主對話自己的呼叫：子代理改檔或驗證不算主對話這一輪
+    if (doneCheckOn && !agent) noteCall(work, e.tool, e, failed)
+    const extra = []
+    const text = r.text ?? (typeof r.result === 'string' ? r.result : undefined)
+    if (retryNudge && trackFailure(streaks, agent + '|' + e.tool, failed, text)) extra.push(T.retryNudge(e.tool, briefOf(text)))
+    const lang = agent ? undefined : takePending(reply)
+    if (lang) extra.push(lang)
+    return extra.length ? { ...r, context: [...(r.context ?? []), ...extra] } : r
+  } catch {
+    return r
+  }
+}
+
 // 沒開就打開，開著就關掉（/board 與輸入框上方的按鈕共用）
 async function toggleBoard($) {
   if (paneOpen) {
@@ -1174,6 +1640,12 @@ export function register(on, options) {
   const awayHours = Number(options?.away_hours)
   if (awayHours > 0) activeWindowMs = awayHours * HOUR
   if (options?.language in I18N || options?.language === 'auto') languageSetting = options.language
+  if (typeof options?.retry_nudge === 'boolean') retryNudge = options.retry_nudge
+  if (typeof options?.done_check === 'boolean') doneCheckOn = options.done_check
+  if (['auto', 'off', 'zh-TW', 'zh-CN', 'en', 'ja'].includes(options?.reply_language)) replyLanguage = options.reply_language
+  if (typeof options?.distill === 'boolean') distillOn = options.distill
+  if (Number(options?.distill_every) > 0) distillEvery = Number(options.distill_every)
+  if (['sonnet', 'haiku', 'opus'].includes(options?.notes_model)) notesModel = options.notes_model
 
   // 切換模型時引擎會告知目前的快取 TTL，以它為準
   on('classic.PostModelSwitch', async ($, e, next) => {
@@ -1185,6 +1657,16 @@ export function register(on, options) {
   on('session.start', async ($, e, next) => {
     T = I18N[await detectLanguage($)]
     sessionId = await $.session.id()
+    // 回覆語言提醒的目標（和介面語言分開：介面只有中英，回覆語言還認得簡中與日文）
+    if (replyLanguage === 'auto') {
+      try {
+        replyTarget = replyLangOfSetting((await $.settings.read()).language)
+      } catch {
+        replyTarget = undefined
+      }
+    } else {
+      replyTarget = replyLanguage === 'off' ? undefined : replyLanguage
+    }
     const savedAuto = await $.store.get('auto')
     if (typeof savedAuto === 'boolean') auto = savedAuto
     const savedWrap = await $.store.get('wrap')
@@ -1200,6 +1682,8 @@ export function register(on, options) {
     await loadHandoff($)
     await loadCompact($)
     await loadLanes($)
+    await loadTalk($)
+    await loadGuards($)
     if (tasksDir && tab === 'progress') tab = 'tasks'
 
     herdrEnv = (await $.env.get('HERDR_ENV')) === '1'
@@ -1240,6 +1724,16 @@ export function register(on, options) {
     } catch (err) {
       note = T.registerFail('handoff', String(err))
     }
+    try {
+      await $.command.register({ name: 'distill', description: T.cmdDistill, immediate: true })
+    } catch (err) {
+      note = T.registerFail('distill', String(err))
+    }
+    try {
+      await $.command.register({ name: 'guard', description: T.cmdGuard, immediate: true })
+    } catch (err) {
+      note = T.registerFail('guard', String(err))
+    }
     return next(e)
   })
 
@@ -1253,6 +1747,15 @@ export function register(on, options) {
     $.clock.after(0, () => handoffNow($))
     return {}
   })
+
+  on('command.run', { command: 'distill' }, async ($) => {
+    if (!distillOn) return { text: T.distillOff }
+    if (distilling) return { text: T.distillBusy }
+    $.clock.after(0, () => distill($, T.distillWhy.manual))
+    return { text: T.distillStarted(talk.humans) }
+  })
+
+  on('command.run', { command: 'guard' }, async ($, e) => ({ text: await guardCommand($, e.args) }))
 
   // 輸入框上方的一顆按鈕：看板關著時才出現，點了打開（狀態列是外部指令輸出的文字，放不了按鈕）
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1281,12 +1784,29 @@ export function register(on, options) {
       // 使用者有新動作，重新允許下一次自動交接
       armed = true
       await saveTimes($)
+      // 使用者的新訊息開始新的一輪：改檔與驗證重新算
+      work = freshWork()
+      // 斜線指令不是對 Claude 說的話，不記；記錄失敗不影響送出
+      try {
+        if (distillOn && !String(e.text ?? '').trimStart().startsWith('/')) await recordTalk($, 'user', e.text)
+      } catch {}
+      // 上一輪最後的回答語言跑掉，提醒跟著這則訊息帶給 Claude
+      const extra = takeNext(reply)
       if (briefOnStart && needsBriefing) {
         needsBriefing = false
         await loadHandoff($)
         await loadLanes($)
-        return next({ ...e, context: [...(e.context ?? []), briefing(await $.clock.now())] })
+        await loadMemories($)
+        await loadGuards($)
+        const promote = promoteCandidates(memories)
+        const drafts = guards.filter((g) => g.state === 'proposed').slice(0, GUARD_ASK_ITEMS)
+        extra.unshift(
+          briefing(await $.clock.now()),
+          ...(promote.length ? [T.promote(promote, memoryDir)] : []),
+          ...(drafts.length ? [T.guardAsk(drafts, guardsFile)] : []),
+        )
       }
+      if (extra.length) return next({ ...e, context: [...(e.context ?? []), ...extra] })
     }
     return next(e)
   })
@@ -1311,6 +1831,10 @@ export function register(on, options) {
     if (!e.agentId) {
       lastRequestAt = await $.clock.now()
       await saveTimes($)
+      // 主對話這一步的說明不是目標語言：還要呼叫工具就跟著下一個工具結果提醒，否則跟著使用者的下一則訊息
+      try {
+        if (replyTarget && result?.answer) noteStep(reply, result.answer, (result.toolUses?.length ?? 0) > 0, replyTarget)
+      } catch {}
     }
     return result
   })
@@ -1320,6 +1844,15 @@ export function register(on, options) {
       working = false
       currentTool = ''
       if (e.answer) lastAnswer = e.answer
+      // 被中斷的回合沒有 Stop：清掉這一輪的改檔紀錄，免得算到下一輪
+      if (e.isAborted) work = freshWork()
+      if (distillOn && e.answer && !(phase === 'handoff' && e.turnId === handoffTurnId)) {
+        try {
+          await recordTalk($, 'assistant', e.answer)
+          // 每 distill_every 則使用者訊息，趁快取還熱整理一次
+          if (talk.humans >= distillEvery && !distilling) $.clock.after(0, () => distill($, T.distillWhy.every(distillEvery)))
+        } catch {}
+      }
       await refreshUsage($)
       if (phase === 'handoff' && handoffTurnId && e.turnId === handoffTurnId) {
         await loadHandoff($)
@@ -1338,6 +1871,20 @@ export function register(on, options) {
       $.ui.invalidate('ui.render')
     }
     return next(e)
+  })
+
+  // 說完成了，但這一輪改檔之後沒跑任何測試或檢查（或跑了沒過）：擋下這次停止，請 Claude 先驗證（每輪最多一次）
+  on('classic.Stop', async ($, e, next) => {
+    const out = await next(e)
+    // 別的 Stop hook 已經要求繼續：回合其實沒結束，等真正停下的那次再判斷
+    if (out?.block !== undefined || e.agent_id !== undefined) return out
+    let kind
+    try {
+      if (doneCheckOn) kind = doneCheck(work, e.last_assistant_message, e.stop_hook_active === true)
+    } catch {}
+    if (kind) return { ...out, block: T.doneCheck[kind] }
+    work = freshWork()
+    return out
   })
 
   // 壓縮後舊的快取前綴就不再使用，倒數歸零，等下一次請求重新建立
@@ -1380,7 +1927,23 @@ export function register(on, options) {
       }
       $.ui.invalidate('ui.render')
     }
-    const result = await next(e)
+    toolsSeen.add(e.tool)
+    // 守門：啟用中的守門命中時，deny 直接擋下，remind 照常執行、在結果後面附提醒；檢查本身出錯就放行
+    let hit
+    try {
+      hit = findGuardHit(guards, e.tool, e)
+    } catch {}
+    if (hit) {
+      try {
+        await recordGuardHit($, hit.id)
+      } catch {}
+      if (hit.mode === 'deny') {
+        $.ui.toast(T.guardDenyToast(hit.id, e.tool, hit.rule))
+        return { deny: T.guardHead(hit) + '\n' + T.guardDenyHint(hit.id) }
+      }
+    }
+    let result = watchCall(e, await next(e))
+    if (hit && result && result.deny === undefined) result = { ...result, context: [...(result.context ?? []), T.guardHead(hit)] }
     if (herdrEnv && !e.agentId && e.tool === 'Bash' && typeof e.command === 'string' && /\bherdr/.test(e.command)) {
       const now = await $.clock.now()
       const found = parseHerdr(e.command)
@@ -1405,6 +1968,8 @@ export function register(on, options) {
       if (memoryDir && samePath(dir, memoryDir)) await loadMemories($)
       if (handoffFile && samePath(path, handoffFile)) await loadHandoff($)
       if (tasksDir && samePath(dir, tasksDir)) await loadLanes($)
+      // 使用者同意後 Claude 直接改守門檔的 state
+      if (guardsFile && samePath(path, guardsFile)) await loadGuards($)
       // 改了專案覆寫檔：重新決定路徑並重讀
       if (projectSettingsWatch.some((p) => samePath(path, p))) {
         await resolvePaths($)
@@ -1549,7 +2114,12 @@ export function register(on, options) {
     const memItem = (m, prefix = '') => {
       const isOpen = expanded === m.file
       const overdue = m.reviewBy && m.reviewBy < today
-      const tags = [m.lane ? '〔' + m.lane + '〕' : '', overdue ? T.dueReview : ''].join('')
+      const tags = [
+        m.count > 1 ? T.countTag(m.count) : '',
+        m.promoted && m.promoted !== 'declined' ? T.promotedTag : '',
+        m.lane ? '〔' + m.lane + '〕' : '',
+        overdue ? T.dueReview : '',
+      ].join('')
       const rows = [
         Button({
           key: prefix + 'mem-' + m.file,
@@ -1579,6 +2149,22 @@ export function register(on, options) {
         ]),
       ]
       rows.push(longLine(memoryDir, { dimColor: true }, 'truncate-middle'))
+      // 自動整理筆記的狀態與「立即整理」
+      if (distillOn) {
+        const d = lastDistill
+        const status = distilling ? T.distilling : !d ? T.neverDistilled : d.error ? T.lastDistillFail(clock(d.at), d.why, d.error) : T.lastDistill(clock(d.at), d.why, d)
+        rows.push(
+          row([
+            Text({ dimColor: true, children: [status + T.untilNext(Math.max(0, distillEvery - talk.humans))] }),
+            Button({ key: 'distill-now', label: T.distillNow, onPress: () => distill($, T.distillWhy.manual) }),
+          ]),
+        )
+        if (d && !d.error && (d.added.length || d.confirmed.length)) rows.push(longLine('  ' + [...d.added.map((n) => '+' + n), ...d.confirmed.map((n) => '↑' + n)].join(' · '), { dimColor: true }))
+      }
+      if (guards.length) {
+        const count = (s) => guards.filter((g) => g.state === s).length
+        rows.push(line([T.guardSummary(count('on'), count('proposed'), count('off'))], { dimColor: true }))
+      }
       if (!memories.length) {
         rows.push(line([T.noMemories], { dimColor: true }))
         return rows

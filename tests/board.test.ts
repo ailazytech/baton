@@ -93,10 +93,14 @@ function setup(
     if (argv[1] === 'agent' && argv[2] === 'list') herdr.runs += 1
     return { value: { exitCode: 0, stdout: JSON.stringify({ result: { agents: herdr.agents } }), stderr: '' } }
   })
+  // 工具回傳與每一步的回答可在測試中改：tools.reply 回傳物件就用它（例如失敗），tools.answer／toolUses 是 turn.step 的結果
+  const tools = { reply: undefined as undefined | ((e: any) => any), answer: 'ok', toolUses: [] as unknown[] }
   // herdr pane split 回傳新 pane；其他 Bash 回 ok
-  on('tool.call', ($: any, e: any) => ({
-    result: /pane split/.test(e.command ?? '') ? '{"result":{"pane":{"pane_id":"w9:pA"}}}' : 'ok',
-  }))
+  on('tool.call', ($: any, e: any) =>
+    tools.reply?.(e) ?? {
+      result: /pane split/.test(e.command ?? '') ? '{"result":{"pane":{"pane_id":"w9:pA"}}}' : 'ok',
+    },
+  )
   const saved = new Map<string, unknown>()
   // 專案裡的檔案（路徑 → 內容），fs.write 會寫進來
   const files = new Map<string, string>()
@@ -198,10 +202,11 @@ function setup(
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('turn.step', async function* ($: any, e: any) {
-    yield { kind: 'text', index: 0, text: 'ok' }
-    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null }
+    yield { kind: 'text', index: 0, text: tools.answer }
+    return { turnId: e.turnId, index: e.index, answer: tools.answer, toolUses: tools.toolUses, stopReason: 'end_turn', usage: null }
   })
-  return { clock, saved, calls, files, herdr }
+  on('classic.Stop', () => ({}))
+  return { clock, saved, calls, files, herdr, tools }
 }
 
 async function start($: any) {
@@ -850,4 +855,237 @@ test('/config 的 language 優先於 Claude Code 的設定', { options: { langua
   await start($)
   await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false })
   expect(calls.contexts[0][0]).toContain('baton handoff mechanism')
+})
+
+// ---------- 防呆提醒 ----------
+
+const fail = (text: string) => ({ isError: true, result: text, text })
+const claim = { last_assistant_message: '已經改好了，完成了。' }
+const stopTurn = ($: any, extra: object = {}) => $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [], ...extra })
+const say = ($: any, text: string) => $.prompt.submit({ text, origin: { kind: 'composer' }, wait: false })
+
+test('同一個工具連續兩次同樣失敗：第 2 次的結果附提醒，只提醒一次', async ($, on) => {
+  const { tools } = setup(on)
+  await start($)
+  tools.reply = () => fail('Error: ENOENT /Users/user/a/b.ts line 3')
+  expect((await $.tool.call({ tool: 'Bash', command: 'node a.js' })).context ?? []).toEqual([])
+  expect((await $.tool.call({ tool: 'Bash', command: 'node a.js' })).context?.[0]).toContain('連續兩次因同樣原因失敗')
+  expect((await $.tool.call({ tool: 'Bash', command: 'node a.js' })).context ?? []).toEqual([])
+})
+
+test('改了程式檔沒跑檢查就說完成：擋下停止；跑過測試或只改文件就放行；測試沒過也擋', async ($, on) => {
+  const { tools } = setup(on)
+  await start($)
+  await $.tool.call({ tool: 'Edit', file_path: ROOT + '/src/a.ts', old_string: 'a', new_string: 'b' })
+  expect((await stopTurn($, claim)).block).toContain('沒有跑任何測試或檢查')
+  // 同一輪再停一次不擋
+  expect((await stopTurn($, { ...claim, stop_hook_active: true })).block).toBeUndefined()
+
+  await $.tool.call({ tool: 'Edit', file_path: ROOT + '/src/a.ts', old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  expect((await stopTurn($, claim)).block).toBeUndefined()
+
+  await $.tool.call({ tool: 'Edit', file_path: ROOT + '/docs/README.md', old_string: 'a', new_string: 'b' })
+  expect((await stopTurn($, claim)).block).toBeUndefined()
+
+  tools.reply = (e: any) => (e.command === 'npm test' ? fail('1 failed') : undefined)
+  await $.tool.call({ tool: 'Edit', file_path: ROOT + '/src/a.ts', old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  expect((await stopTurn($, claim)).block).toContain('沒有通過')
+})
+
+test('防呆提醒跟著介面語言：英文介面用英文提醒', { options: { language: 'en' } }, async ($, on) => {
+  setup(on)
+  await start($)
+  await $.tool.call({ tool: 'Write', file_path: ROOT + '/src/a.ts', content: 'x' })
+  expect((await stopTurn($, { last_assistant_message: 'All done.' })).block).toContain('no test or check ran')
+})
+
+test('done_check 關掉時不擋', { options: { done_check: false } }, async ($, on) => {
+  setup(on)
+  await start($)
+  await $.tool.call({ tool: 'Edit', file_path: ROOT + '/src/a.ts', old_string: 'a', new_string: 'b' })
+  expect((await stopTurn($, claim)).block).toBeUndefined()
+})
+
+const ENGLISH = 'I updated the handler so that it now reads the settings file before starting, and then I ran the whole suite again to confirm that nothing else was affected by this change.'
+
+test('回答不是繁體中文：使用者下一則訊息附提醒，之後不重複；夾英文術語的中文不提醒', async ($, on) => {
+  const { tools, calls } = setup(on)
+  await start($)
+  await say($, '繼續')
+  tools.answer = ENGLISH
+  await $.turn.start({ turnId: 't1', text: '繼續' })
+  await step($, 't1')
+  await say($, '好')
+  expect(calls.contexts[1].join('\n')).toContain('不是繁體中文')
+  tools.answer = '我改了 `register.js` 的 tool.call hook，讓 watchCall 在每次工具結果後檢查失敗簽名，接著跑 claude plugin test，所有項目全部通過，沒有任何失敗或錯誤，看板的其他功能也照常運作沒有受到影響。'
+  await $.turn.start({ turnId: 't2', text: '好' })
+  await step($, 't2')
+  await say($, '再一次')
+  expect(calls.contexts[2]).toEqual([])
+})
+
+// ---------- 自動整理筆記 ----------
+
+const modelReply = (on: any, text: string) => {
+  const prompts: string[] = []
+  on('model.complete', ($: any, e: any) => {
+    prompts.push(e.prompt)
+    return { value: { isAnswered: true, text, usage: { input_tokens: 1, output_tokens: 1 } } }
+  })
+  return prompts
+}
+
+test('整理筆記：使用者的原話新增成記憶檔並加進 MEMORY.md；講過的加次數；原話對不上的丟掉', async ($, on) => {
+  const { clock, files } = setup(on)
+  const prompts = modelReply(
+    on,
+    [
+      '<<<ACTIONS',
+      JSON.stringify({ op: 'add', name: 'ask-before-commit', title: 'commit 前先問', type: 'feedback', layer: 'project', description: '不要自己 commit，先問', body: '不要自己 commit。\n\n**Why:** 使用者要先看 diff\n**How to apply:** 改完先回報', quote: '不要自己 commit' }),
+      JSON.stringify({ op: 'confirm', name: 'no-hotkeys', quote: '不要用快捷鍵' }),
+      JSON.stringify({ op: 'add', name: 'made-up', title: '亂編', type: 'feedback', layer: 'project', description: 'x', body: 'x', quote: '使用者沒說過這句' }),
+      'ACTIONS>>>',
+    ].join('\n'),
+  )
+  await start($)
+  await say($, '不要自己 commit，先問我')
+  await say($, '還有看板不要用快捷鍵')
+  await $.command.run({ command: 'distill', args: '' })
+  await clock.advance(10)
+  expect(prompts[0]).toContain('【使用者】不要自己 commit，先問我')
+  expect(prompts[0]).toContain('- no-hotkeys｜feedback｜講過 1 次')
+  const added = files.get(MEMORY_DIR + '/ask-before-commit.md') ?? ''
+  expect(added).toContain('name: ask-before-commit')
+  expect(added).toContain('  count: 1')
+  expect(added).toContain('  layer: project')
+  expect(files.get(MEMORY_DIR + '/MEMORY.md')).toContain('- [commit 前先問](ask-before-commit.md) — 不要自己 commit，先問')
+  const confirmed = files.get(MEMORY_DIR + '/no-hotkeys.md') ?? ''
+  expect(confirmed).toContain('  count: 2')
+  expect(confirmed).toContain('  type: feedback')
+  expect(confirmed).toContain('不要幫我用快捷鍵。')
+  expect(files.has(MEMORY_DIR + '/made-up.md')).toBe(false)
+
+  // 整理過的對話不會再送一次
+  await $.command.run({ command: 'distill', args: '' })
+  await clock.advance(10)
+  expect(prompts.length).toBe(1)
+})
+
+test('整理筆記：英文介面送英文提示', { options: { language: 'en' } }, async ($, on) => {
+  const { clock } = setup(on)
+  const prompts = modelReply(on, '<<<ACTIONS\nACTIONS>>>')
+  await start($)
+  await say($, 'please keep replies short')
+  await $.command.run({ command: 'distill', args: '' })
+  await clock.advance(10)
+  expect(prompts[0]).toContain('[User] please keep replies short')
+  expect(prompts[0]).toContain('=== Existing memories ===')
+})
+
+test('整理筆記：每 distill_every 則訊息自動整理', { options: { distill_every: '15' } }, async ($, on) => {
+  const { clock } = setup(on)
+  const prompts = modelReply(on, '<<<ACTIONS\nACTIONS>>>')
+  await start($)
+  for (let i = 0; i < 15; i++) {
+    await say($, '第 ' + i + ' 則')
+    await $.turn.start({ turnId: 't' + i, text: '第 ' + i + ' 則' })
+    await $.turn.complete({ turnId: 't' + i, answer: '好', durationMs: 10, isAborted: false, usage: null })
+    await clock.advance(10)
+  }
+  expect(prompts.length).toBe(1)
+})
+
+test('整理筆記：模型失敗時對話留著，下次再整理', async ($, on) => {
+  const { clock } = setup(on)
+  let ok = false
+  const prompts: string[] = []
+  on('model.complete', ($: any, e: any) => {
+    prompts.push(e.prompt)
+    return { value: ok ? { isAnswered: true, text: '<<<ACTIONS\nACTIONS>>>', usage: {} } : { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: {} } }
+  })
+  await start($)
+  await say($, '回覆短一點')
+  await $.command.run({ command: 'distill', args: '' })
+  await clock.advance(10)
+  ok = true
+  await $.command.run({ command: 'distill', args: '' })
+  await clock.advance(10)
+  expect(prompts.length).toBe(2)
+  expect(prompts[1]).toContain('回覆短一點')
+})
+
+test('講 3 次以上的要求：新 session 開頭請 Claude 放進專案', async ($, on) => {
+  const { calls } = setup(on, {
+    memoryFiles: {
+      'no-commit.md': '---\nname: no-commit\ndescription: 不要自己 commit\nmetadata:\n  type: feedback\n  layer: project\n  count: 3\n---\n\n不要自己 commit。\n',
+      'done.md': '---\nname: done\ndescription: 已放進專案的\nmetadata:\n  type: feedback\n  count: 5\n  promoted: AGENTS.md\n---\n\nx\n',
+    },
+  })
+  await start($)
+  await say($, '繼續')
+  const ctx = calls.contexts[0].join('\n')
+  expect(ctx).toContain('已經講了 3 次以上')
+  expect(ctx).toContain('no-commit（project，講過 3 次）')
+  expect(ctx).not.toContain('done（')
+})
+
+// ---------- 守門 ----------
+
+const GUARDS = MAC.home + '/.claude/projects/' + MAC.project + '/baton-guards.json'
+const guard = (over: object) => ({ id: 1, rule: 'no-push', tool: 'Bash', match: 'git\\s+push', mode: 'deny', message: '推送前先問使用者', state: 'on', at: 0, ...over })
+
+test('啟用的守門：deny 擋下並跳通知，remind 照常執行再附提醒，沒啟用的不管', async ($, on) => {
+  const { files, calls } = setup(on)
+  files.set(GUARDS, JSON.stringify([guard({}), guard({ id: 2, rule: 'no-rm', match: 'rm\\s+-rf', mode: 'remind', message: '刪除前先確認' }), guard({ id: 3, match: 'npm publish', state: 'proposed' })]))
+  await start($)
+  const denied = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
+  expect(denied.deny).toContain('守門 #1')
+  expect(calls.toasts.some((t: string) => t.includes('擋下 Bash'))).toBe(true)
+  const reminded = await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
+  expect(reminded.deny).toBeUndefined()
+  expect(reminded.context?.join('\n')).toContain('刪除前先確認')
+  const free = await $.tool.call({ tool: 'Bash', command: 'npm publish' })
+  expect(free.deny).toBeUndefined()
+  expect(free.context ?? []).toEqual([])
+})
+
+test('待問的守門：新 session 開頭請 Claude 問使用者，並告訴它改哪個檔；/guard on 啟用', async ($, on) => {
+  const { files, calls } = setup(on)
+  files.set(GUARDS, JSON.stringify([guard({ state: 'proposed' })]))
+  await start($)
+  await say($, '繼續')
+  const ctx = calls.contexts[0].join('\n')
+  expect(ctx).toContain('守門 #1（擋下）')
+  expect(ctx).toContain(GUARDS)
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' })).deny).toBeUndefined()
+  await $.command.run({ command: 'guard', args: 'on 1' })
+  expect(JSON.parse(files.get(GUARDS) ?? '[]')[0].state).toBe('on')
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' })).deny).toContain('守門 #1')
+})
+
+test('/guard suggest：放進專案後又被糾正的規則起草成守門；範例對不上的丟掉', async ($, on) => {
+  const { files } = setup(on, {
+    memoryFiles: {
+      'no-push.md': '---\nname: no-push\ndescription: 推送前先問\nmetadata:\n  type: feedback\n  count: 4\n  promoted: AGENTS.md\n  promoted_count: 3\n---\n\n不要自己 git push。\n',
+      'quiet.md': '---\nname: quiet\ndescription: 回覆短\nmetadata:\n  type: feedback\n  count: 2\n---\n\n短。\n',
+    },
+  })
+  const prompts = modelReply(
+    on,
+    [
+      '<<<GUARDS',
+      JSON.stringify({ rule: 'no-push', tool: 'Bash', match: 'git\\s+push', mode: 'deny', message: '推送前先問使用者', bad: 'git push origin main', good: 'git status' }),
+      JSON.stringify({ rule: 'quiet', tool: 'Bash', match: 'x', mode: 'remind', message: 'm', bad: 'x', good: 'y' }),
+      'GUARDS>>>',
+    ].join('\n'),
+  )
+  await start($)
+  await $.command.run({ command: 'guard', args: 'suggest' })
+  expect(prompts[0]).toContain('### no-push（講過 4 次）')
+  expect(prompts[0]).not.toContain('### quiet')
+  const saved = JSON.parse(files.get(GUARDS) ?? '[]')
+  expect(saved.length).toBe(1)
+  expect(saved[0]).toMatchObject({ id: 1, rule: 'no-push', state: 'proposed', mode: 'deny' })
 })

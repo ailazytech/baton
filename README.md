@@ -23,6 +23,8 @@ baton 的做法：
 - **新 session／壓縮後自動補上下文**：第一個 prompt 自動附上交接文件，不用自己貼。
 - **一個面板看所有工作線**：每條 lane 一個 JSON 狀態檔，「等你」「失敗」「待審」排最前面並跳通知；點進去看即時畫面、送按鍵、直接回覆，不用切 pane。
 - **記憶分層**：使用者偏好、專案事實、某條線的細節、會過期的階段資訊分開放，過期的會提醒你檢查。
+- **不用重講同一件事**：你親口說的要求與糾正自動整理進記憶並記次數；講到 3 次就請 Claude 寫進專案的 CLAUDE.md／AGENTS.md，寫了還一再違反就起草成守門。
+- **當下攔住常見的壞習慣**：同一個錯誤原樣重試、沒驗證就說完成、回覆語言跑掉，當下給 Claude 一句提醒。
 
 ## 快速開始
 
@@ -36,6 +38,8 @@ claude plugin install baton@baton
 
 - `/board`：開關看板。**輸入過 `/board` 的 session 才會啟用自動交接**（當作主控 session）。
 - `/handoff`：立即交接，不用開看板。非全螢幕時滑鼠點不到看板按鈕，就用這個。
+- `/distill`：立即整理筆記（見「自動整理筆記」）。
+- `/guard`：查看與管理守門（見「守門」）。
 - 看板關著時，輸入框上方右側有一顆「◧ 工作看板」按鈕（`/config` 的 `launcher_button` 可關）。
 
 看板要停靠在右側，需要全螢幕版面（`CLAUDE_CODE_NO_FLICKER=1`）且終端至少 110 欄；否則放在輸入框上方。
@@ -64,6 +68,35 @@ claude plugin install baton@baton
 3. 交接那一輪結束後自動壓縮對話；摘要存到交接文件旁的 `*.compact.md`，看板「壓縮後保留」可展開。
 4. 壓縮後的第一個 prompt，再把交接文件附給 Claude（`/config` 的 `brief_on_start` 可關）。還沒設 `tasks_dir` 的專案會多附一段，請 Claude 遇到多條並行工作時問你要不要開「任務」分頁。
 
+### 防呆提醒
+
+都是給 Claude 的一句話，你看不到，也不會擋你的工具。預設全開，`/config` 可以個別關。邏輯移植自 [ctx-handoff-mod](https://github.com/cablate/ctx-handoff-mod)（MIT）。
+
+- **重複失敗**（`retry_nudge`）：同一個工具連續兩次因同樣原因失敗，請 Claude 先找原因、換做法；看起來是暫時性錯誤（逾時、還在載入）就稍等再試一次
+- **說完成卻沒驗證**（`done_check`）：這一輪改過程式檔、之後沒跑過通過的測試／建置／檢查（或跑了沒過）就說完成，擋下這次停止，請它先驗證或誠實說明。只改文件（`.md` 等）、`scratchpad/`、`.review/` 不算。Claude Code 會顯示成「Stop hook feedback」，那就是這個提醒
+- **回覆語言**（`reply_language`）：說明大部分不是目標語言時提醒一次。`auto` 跟著 Claude Code 的 `language` 設定（認得繁中、簡中、英文、日文）。程式碼、指令、路徑和很短的句子不算，中文夾英文術語不會觸發
+
+### 自動整理筆記
+
+把你親口說的要求、偏好與糾正，整理進記憶資料夾（就是「記憶」分頁讀的那個）。
+
+- **什麼時候**：你送出 `distill_every` 則訊息後（預設 30）、交接前、`/distill`，或按記憶分頁的「立即整理」
+- **送什麼**：上次整理之後你打的訊息和 Claude 的回答（斜線指令不算），交給 `notes_model`（預設 Sonnet，effort low）。每次整理是一個背景請求，不佔主對話。對話紀錄依專案存在外掛的 store，換 session 後沒整理到的會接著整理
+- **寫什麼**：只記 `feedback`（要求與糾正）和 `user`（你的背景）。新的寫成一則一檔、加進 `MEMORY.md`；講過的在 frontmatter 的 `metadata.count` 加一、更新 `last_seen`
+- **防亂記**：每一條都要附你的原話，程式會拿去比對你實際打過的訊息，對不上就丟掉；像金鑰或密碼的也丟掉。失敗（模型沒回應等）時對話留著，下次再整理
+- **講到 3 次**：新 session 開頭請 Claude 在做完你交代的事之後，把 `layer: project` 的放進專案的 CLAUDE.md／AGENTS.md（不 commit），`layer: user` 的先問你要不要加進全域 `~/.claude/CLAUDE.md`；放好後在記憶檔標 `promoted`
+- 記憶分頁會顯示 `×次數`、`✓專案` 與上次整理的結果；`distill` 可以整個關掉
+
+### 守門
+
+寫下來也擋不住的要求，改成工具呼叫前的檢查。移植自 ctx-handoff-mod。
+
+- **什麼時候起草**：整理筆記後，某則要求放進專案之後次數又變多（又被糾正），或你不讓它放進專案（`promoted: declined`）卻講了 3 次。也可以 `/guard suggest`
+- **草稿**：模型寫出工具名稱與正規表達式（`match`／`unless`），附一個違規範例和一個正確範例，程式實際比對過才收。存在 `{config}/projects/{project}/baton-guards.json`（不進 repo）
+- **你同意之前不會生效**：新 session 開頭請 Claude 做完你交代的事後問你；你說要，Claude 直接把檔裡那條的 `state` 改成 `on`（不要就 `off`）。也可以 `/guard on N`
+- **生效後**：`deny` 在執行前擋下並跳通知，`remind` 照常執行、在結果後面提醒 Claude。檢查本身出錯就放行
+- `/guard` 列出全部與命中次數；`/guard off N`、`/guard drop N`、`/guard mode N deny|remind`
+
 ## 設定
 
 在 `/config` 可以改：
@@ -77,6 +110,12 @@ claude plugin install baton@baton
 | `cache_ttl` | 提示快取時效 `1h`／`5m`；切換模型時以引擎告知的值為準 | `1h` |
 | `away_hours` | 最後一次輸入超過幾小時就不再自動交接（`24`／`8`／`2`） | `24` |
 | `language` | 介面語言 `auto`／`zh-TW`／`en`。`auto` 先看 Claude Code 的 `language` 設定，沒設再看 `LANG`；任何中文都用繁體中文，其他語言用英文 | `auto` |
+| `retry_nudge` | 重複失敗提醒 | 開 |
+| `done_check` | 沒驗證就說完成時擋下 | 開 |
+| `reply_language` | 回覆語言提醒 `auto`／`off`／`zh-TW`／`zh-CN`／`en`／`ja` | `auto` |
+| `distill` | 自動整理筆記（也關掉講 3 次放進專案與起草守門） | 開 |
+| `distill_every` | 每幾則訊息整理一次（`30`／`50`／`15`） | `30` |
+| `notes_model` | 整理筆記與起草守門用的模型（`sonnet`／`haiku`／`opus`） | `sonnet` |
 
 路徑可用 `{config}`（`~/.claude` 或 `CLAUDE_CONFIG_DIR`）、`{project}`（專案代號）、`{root}`（專案根目錄）、`~`；相對路徑以專案根目錄為準。
 
@@ -139,10 +178,16 @@ metadata:
   layer: user           # user / project / workstream / phase
   lane: api             # layer 是 workstream 時，掛到哪條 lane
   review_by: 2026-11-01 # layer 是 phase 時，過了這天標「該檢查了」
+  count: 2              # 自動整理筆記記的：你講過幾次
+  last_seen: 2026-10-19 # 最後一次講是哪天
+  promoted: AGENTS.md   # 已放進專案的位置；你不要放就是 declined
+  promoted_count: 3     # 放進專案時的次數（之後又變多就會起草守門）
 ---
 
 不要幫我用快捷鍵。
 ```
+
+`count` 以下是自動整理筆記與守門用的，手寫的記憶不用填（沒寫就當成 1 次）。
 
 ## 讓 AI agent 接手
 

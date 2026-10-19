@@ -12,12 +12,16 @@ baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一
 
 | 路徑 | 內容 |
 | --- | --- |
-| `hooks/register.js` | 全部的程式：狀態、hook 處理、看板畫面。`export function register(on, options)` 是進入點 |
-| `hooks/hooks.json` | 宣告模組 `./register.js` |
+| `hooks/register.js` | 狀態、hook 處理、看板畫面、所有文字（`I18N`）。`export function register(on, options)` 是進入點 |
+| `hooks/nudges.js` | 防呆提醒的判斷：連續失敗的簽名、改檔與驗證的紀錄、「完成了」的說法、回覆語言判斷。純函式 |
+| `hooks/notes.js` | 自動整理筆記的判斷：解析與驗證整理模型的輸出、改寫記憶檔 frontmatter、講 3 次的候選。純函式 |
+| `hooks/guards.js` | 守門的判斷：比對工具參數、起草候選、驗證模型的草稿。純函式 |
+| `hooks/hooks.json` | 宣告模組 `./register.js`（其他三個由它 import） |
 | `.claude-plugin/plugin.json` | 外掛名稱、版本、`userConfig`（`/config` 裡的設定項） |
 | `.claude-plugin/marketplace.json` | 讓這個 repo 本身可以當 marketplace 加入 |
 | `.claude-plugin/types/` | Claude Code 提供的型別宣告（`claude-code`、`claude-code-tools`、`claude-code-mcp`），已 gitignore，不要手改 |
-| `tests/board.test.ts` | 測試，用 `claude-code/testing` 的 `test`、`mock`、`expect` |
+| `tests/board.test.ts` | 整合測試，用 `claude-code/testing` 的 `test`、`mock`、`expect` |
+| `tests/logic.test.ts` | `nudges.js`、`notes.js`、`guards.js` 的純函式測試 |
 | `README.md`／`README.en.md` | 使用者文件（中英） |
 
 ## register.js 的結構
@@ -28,11 +32,12 @@ baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一
 2. **模組層級的狀態**：`let` 變數（介面、執行狀態、herdr、lane、記憶、交接、`phase`）。整個外掛是一個 session 一份狀態
 3. **工具函式**：路徑展開（`expandPath`、`resolvePaths`）、記憶解析（`parseMemory`）、lane（`loadLanes`、`laneStanding`…）、herdr（`parseHerdr`、`refreshHerdr`）、交接（`briefing`、`handoffPrompt`、`startHandoff`、`runCompact`、`checkTrigger`）
 4. **`register(on, options)`**：註冊 hook
-   - `session.start`：讀設定與資料、每秒 tick（`$.clock.every`）、註冊 `/board`、`/handoff`
-   - `prompt.submit`：使用者第一個 prompt 附上 `briefing()`（`e.context`）
-   - `turn.start`／`turn.step`／`turn.complete`：執行狀態、快取計時（`lastRequestAt`）、交接那一輪結束後觸發壓縮
+   - `session.start`：讀設定與資料、每秒 tick（`$.clock.every`）、註冊 `/board`、`/handoff`、`/distill`、`/guard`
+   - `prompt.submit`：使用者第一個 prompt 附上 `briefing()`、講 3 次的要求（`T.promote`）、待問的守門（`T.guardAsk`）；每則使用者訊息記進整理筆記用的對話紀錄（`recordTalk`），並帶出上一輪的回覆語言提醒
+   - `turn.start`／`turn.step`／`turn.complete`：執行狀態、快取計時（`lastRequestAt`）、交接那一輪結束後觸發壓縮；`turn.step` 判斷回覆語言，`turn.complete` 記下回答、每 `distill_every` 則訊息觸發整理
+   - `classic.Stop`：說完成了卻沒驗證時回 `block`（`doneCheck`）
    - `session.compact`、`classic.PostCompact`：存壓縮摘要
-   - `tool.call`：記錄工具呼叫、偵測 Bash 裡的 herdr 指令
+   - `tool.call`：守門比對（`findGuardHit`，deny 直接回 `deny`）、記錄工具呼叫、防呆觀察（`watchCall`：連續失敗、改檔與驗證）、偵測 Bash 裡的 herdr 指令、改了記憶／守門檔就重讀
    - `ui.render`（`AbovePrompt`、`Pane`）：畫按鈕與看板
 5. 看板畫面在 `ui.render { component: 'Pane' }` 裡，用 `$.ui.resolve(e)` 拿到 `Box`、`Button`、`Markdown` 等元件，依 `tab` 與 `route`（任務分頁的子頁堆疊）組出列。
 
@@ -44,10 +49,19 @@ baton 是 Claude Code 的 hooks 外掛（plugin 的 `hooks/hooks.json` 指向一
 - 只認 `turn.start` 文字裡含 `HANDOFF_PREFIX` 的那一輪是交接輪（引擎會在外掛訊息前加前綴，所以用 `includes` 不用 `startsWith`）
 - 那一輪被中斷就不壓縮；`session.compact` 被拒絕（還有一輪在跑）會重試最多 6 次
 - 有 `tasks_dir` 時，交接指示與 briefing 改成 lane 狀態檔版本（`laneBriefing`、`handoffPrompt` 的 `tasksDir` 分支）
+- `startHandoff` 會順便觸發一次整理筆記（另一個 `$.model.complete` 請求，不佔主對話）
+
+### 自動整理筆記與守門
+
+- 對話紀錄（`talk`）依專案存在 `$.store` 的 `talk:<專案代號>`（不是依 session：換 session 後沒整理到的要接著整理）：只有使用者親手打的訊息（`prompt.submit` 的 `composer`／`bridge`，斜線指令除外）與主對話的回答。整理成功才丟掉送出去的那段；失敗留著下次再送
+- 整理模型的輸出每條都要附 `quote`，`parseActions` 會拿去比對使用者打過的訊息，對不上就丟掉。這是防止模型把 Claude 的話或自己的推論記成使用者的要求，不要拿掉
+- 記憶檔只改 frontmatter 的 `metadata`（`setMeta`），內文不動；新增的記憶 `metadata.source: baton`
+- 守門存在 `{config}/projects/{project}/baton-guards.json`。使用者同意由 Claude 直接改檔（`tool.call` 看到這個檔被寫就重讀），不需要另外的指令
+- `tool.call` 是會擋住工具的 hook：裡面新加的東西一律 `try`／`catch`，出錯就放行
 
 ## 慣例
 
-- **介面語言**：使用者看得到的文字（看板、toast、指令說明）和送給 Claude 的文字（briefing、交接指示、壓縮指示）一律放在 `I18N`，用 `T.xxx` 取用，不要在程式裡寫死字串。新增一項就要同時補 `zh-TW` 和 `en`。語言在 `session.start` 由 `detectLanguage` 決定
+- **介面語言**：使用者看得到的文字（看板、toast、指令說明）和送給 Claude 或整理模型的文字（briefing、交接指示、壓縮指示、防呆提醒、整理與守門的提示）一律放在 `I18N`，用 `T.xxx` 取用，不要在程式裡寫死字串。新增一項就要同時補 `zh-TW` 和 `en`。語言在 `session.start` 由 `detectLanguage` 決定。唯一的例外是 `nudges.js` 的回覆語言提醒：它要用「目標語言」寫（繁中、簡中、英、日），和介面語言無關。`nudges.js`、`notes.js`、`guards.js` 只放判斷邏輯，被丟掉的原因用英文短句、不翻譯（只拿來計數與除錯）
 - **文件**：改了介面文字或行為，`README.md` 與 `README.en.md` 都要更新；程式註解與測試名稱目前用繁體中文
 - **風格**：2 格縮排、單引號、不加分號、尾隨逗號；跟周圍程式一致
 - **註解**：寫「為什麼」，尤其是引擎行為的限制（例如「command.run 裡不能直接 prompt.submit」）
@@ -80,7 +94,10 @@ claude plugin test
 | 想做的事 | 從這裡看 |
 | --- | --- |
 | 改交接指示的內容 | `I18N` 的 `handoffHead`、`handoffLane`、`handoffDocSteps`、`compactLane`、`compactDoc` |
-| 改新 session 附給 Claude 的說明 | `I18N` 的 `briefing`、`laneBriefing` |
+| 改新 session 附給 Claude 的說明 | `I18N` 的 `briefing`、`laneBriefing`、`promote`、`guardAsk` |
+| 改防呆提醒 | 判斷在 `nudges.js`；文字在 `I18N` 的 `retryNudge`、`doneCheck` |
+| 改整理筆記記什麼 | `I18N` 的 `distillPrompt`；驗證在 `notes.js` 的 `parseActions` |
+| 改守門的起草與比對 | `I18N` 的 `guardPrompt`；比對與驗證在 `guards.js` |
 | 加一種介面語言 | `I18N` 加一組、`detectLanguage`、`plugin.json` 的 `language` 選項 |
 | 改觸發條件 | `checkTrigger` |
 | 加 lane 欄位 | `loadLanes`（驗證）、`laneStanding`、`ui.render` 的 lane 子頁 |

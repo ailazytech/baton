@@ -23,6 +23,8 @@ What baton does:
 - **Restores context automatically**: the first prompt of a new session (or after compaction) gets the handoff attached — no pasting.
 - **One panel for every lane**: each lane is a JSON status file. "Waiting on you", "failed" and "needs review" come first with notifications; open a lane to see its live screen, send keys, or reply without switching panes.
 - **Layered memory**: user preferences, project facts, lane-specific details and short-lived phase notes are kept apart, and stale ones are flagged for review.
+- **Never repeat yourself**: requests and corrections you make are distilled into memory with a count; at 3, Claude is asked to write them into the project's CLAUDE.md / AGENTS.md, and if they keep being broken after that, a guard is drafted.
+- **Catch bad habits on the spot**: retrying the same failure as is, claiming "done" without verifying, drifting out of your language — Claude gets a one-line nudge right away.
 
 ## Quick start
 
@@ -36,6 +38,8 @@ Open a new session and type `/board`.
 
 - `/board`: toggle the board. **Only sessions that have run `/board` get automatic handoff** (they become the lead session).
 - `/handoff`: hand off now without opening the board. Use this when the mouse can't reach the board buttons (non-fullscreen layout).
+- `/distill`: update notes now (see "Auto notes").
+- `/guard`: view and manage guards (see "Guards").
 - While the board is closed, a "◧ Work board" button appears at the top right of the prompt box (disable with `launcher_button` in `/config`).
 
 Docking on the right requires the fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1`) and a terminal at least 110 columns wide; otherwise the board sits above the prompt box.
@@ -64,6 +68,35 @@ Docking on the right requires the fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1`)
 3. When the handoff turn ends, the conversation is compacted. The summary is saved next to the handoff document as `*.compact.md` and can be expanded on the board.
 4. The first prompt after compaction gets the handoff document attached again (disable with `brief_on_start`). Projects without `tasks_dir` also get a note asking Claude to offer you a Tasks tab when it sees several parallel workstreams.
 
+### Nudges
+
+One-line messages to Claude; you don't see them and they never block your tools. All on by default, each can be turned off in `/config`. The logic is ported from [ctx-handoff-mod](https://github.com/cablate/ctx-handoff-mod) (MIT).
+
+- **Repeated failure** (`retry_nudge`): when a tool fails twice in a row for the same reason, Claude is asked to find the cause and change approach; if the error looks transient (timeout, still loading), to wait and retry once
+- **"Done" without verifying** (`done_check`): if Claude edited code this turn and then claims it's done without a passing test / build / check after the edit (or the check failed), that stop is blocked and Claude is asked to verify or explain honestly. Docs-only edits (`.md` etc.), `scratchpad/` and `.review/` don't count. Claude Code shows this as "Stop hook feedback"
+- **Reply language** (`reply_language`): a one-time reminder when an explanation is mostly not in the target language. `auto` follows Claude Code's `language` setting (Traditional / Simplified Chinese, English, Japanese). Code, commands, paths and very short replies are ignored, so English terms inside Chinese prose don't trigger it
+
+### Auto notes
+
+Your own requests, preferences and corrections are distilled into the memory folder (the one the Memory tab reads).
+
+- **When**: after `distill_every` of your messages (default 30), before a handoff, on `/distill`, or with "Update now" on the Memory tab
+- **What is sent**: your messages and Claude's replies since the last pass (slash commands excluded), to `notes_model` (default Sonnet, effort low). Each pass is one background request and doesn't occupy the main conversation. The log is kept per project in the plugin store, so anything not yet distilled carries over to the next session
+- **What is written**: only `feedback` (requests and corrections) and `user` (your background). New ones become one file each and are added to `MEMORY.md`; repeated ones get `metadata.count` incremented and `last_seen` updated in their frontmatter
+- **No made-up notes**: every entry must quote your exact words, which are checked against the messages you actually typed; anything that doesn't match is dropped, as is anything that looks like a key or password. If a pass fails (no reply from the model, etc.) the log is kept for the next pass
+- **Said 3 times**: at the start of a new session Claude is asked, after finishing what you asked for, to put `layer: project` ones into the project's CLAUDE.md / AGENTS.md (without committing), and to ask you before adding `layer: user` ones to the global `~/.claude/CLAUDE.md`; once placed, the memory is marked `promoted`
+- The Memory tab shows `×count`, `✓project` and the last pass; `distill` turns the whole thing off
+
+### Guards
+
+For requests that keep being broken even when written down: a check before tool calls. Ported from ctx-handoff-mod.
+
+- **When drafted**: after a notes pass, when a request already placed in the project gets a higher count again (you corrected it again), or one you kept out of the project (`promoted: declined`) reaches 3. Or run `/guard suggest`
+- **Drafts**: the model writes a tool name and regular expressions (`match` / `unless`) plus one violating and one correct example; the program checks both before accepting. Stored in `{config}/projects/{project}/baton-guards.json` (outside the repo)
+- **Nothing takes effect until you agree**: at the start of a new session Claude asks you after finishing your request; if you say yes, Claude sets that entry's `state` to `on` in the file (`off` if not). Or run `/guard on N`
+- **Once on**: `deny` blocks before running and shows a toast; `remind` runs as usual and appends a reminder for Claude. If the check itself errors, the call goes through
+- `/guard` lists all guards with hit counts; `/guard off N`, `/guard drop N`, `/guard mode N deny|remind`
+
 ## Configuration
 
 In `/config`:
@@ -77,6 +110,12 @@ In `/config`:
 | `cache_ttl` | Prompt cache TTL, `1h` / `5m`; the value reported by the engine on model switch wins | `1h` |
 | `away_hours` | Stop auto-handoff after this many hours without input (`24` / `8` / `2`) | `24` |
 | `language` | UI language, `auto` / `zh-TW` / `en`. `auto` uses Claude Code's `language` setting, else `LANG`; any Chinese maps to Traditional Chinese, anything else to English | `auto` |
+| `retry_nudge` | Repeated-failure nudge | on |
+| `done_check` | Block "done" without verifying | on |
+| `reply_language` | Reply language nudge, `auto` / `off` / `zh-TW` / `zh-CN` / `en` / `ja` | `auto` |
+| `distill` | Auto notes (also turns off "said 3 times" and guard drafting) | on |
+| `distill_every` | Update notes every N messages (`30` / `50` / `15`) | `30` |
+| `notes_model` | Model for notes and guard drafts (`sonnet` / `haiku` / `opus`) | `sonnet` |
 
 Paths may use `{config}` (`~/.claude` or `CLAUDE_CONFIG_DIR`), `{project}` (project slug), `{root}` (project root), and `~`. Relative paths resolve against the project root.
 
@@ -139,10 +178,16 @@ metadata:
   layer: user           # user / project / workstream / phase
   lane: api             # for workstream: which lane it belongs to
   review_by: 2026-11-01 # for phase: flagged after this date
+  count: 2              # from auto notes: how many times you said it
+  last_seen: 2026-10-19 # the last day you said it
+  promoted: AGENTS.md   # where it was placed in the project; declined if you said no
+  promoted_count: 3     # the count when it was placed (a higher count later drafts a guard)
 ---
 
 Don't add hotkeys for me.
 ```
+
+The fields from `count` down are used by auto notes and guards; hand-written memories don't need them (missing count means 1).
 
 ## Handing this to an AI agent
 

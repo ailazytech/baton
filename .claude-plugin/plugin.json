@@ -1,7 +1,7 @@
 {
   "name": "baton",
-  "version": "0.6.0",
-  "description": "Work board for Claude Code: auto handoff + compaction before the prompt cache expires, lane overview, layered memory / 工作看板：快取將過期時自動交接並壓縮、lane 一覽、分層記憶",
+  "version": "0.7.0",
+  "description": "Work board for Claude Code: auto handoff + compaction before the prompt cache expires, lane overview, layered memory, auto notes, nudges and guards / 工作看板：快取將過期時自動交接並壓縮、lane 一覽、分層記憶、自動整理筆記、防呆提醒與守門",
   "author": { "name": "ailazytech" },
   "license": "MIT",
   "repository": "https://github.com/ailazytech/baton",
@@ -50,6 +50,45 @@
       "description": "Skip auto-handoff when the last input is older than this / 最後一次輸入超過這麼久，快取到期前就不再自動交接",
       "options": ["24", "8", "2"],
       "default": "24"
+    },
+    "retry_nudge": {
+      "type": "boolean",
+      "title": "Repeated-failure nudge / 重複失敗提醒",
+      "description": "When a tool fails twice in a row for the same reason, ask Claude to find the cause instead of retrying as is / 同一個工具連續兩次因同樣原因失敗時，請 Claude 先找原因、換做法",
+      "default": true
+    },
+    "done_check": {
+      "type": "boolean",
+      "title": "Verify before \"done\" / 沒驗證就說完成時擋下",
+      "description": "When Claude edited code this turn and says it's done without a passing test or check, ask it to verify or explain (docs-only edits don't count) / Claude 這一輪改了程式檔、沒跑過通過的測試或檢查就說完成時，請它先驗證或誠實說明（只改文件不算）",
+      "default": true
+    },
+    "reply_language": {
+      "type": "string",
+      "title": "Reply language nudge / 回覆語言提醒",
+      "description": "Remind Claude once when its explanation is mostly not in this language. auto: Claude Code's language setting; off: disabled / Claude 的說明大部分不是這個語言時提醒一次。auto＝跟著 Claude Code 的 language 設定；off＝關閉",
+      "options": ["auto", "off", "zh-TW", "zh-CN", "en", "ja"],
+      "default": "auto"
+    },
+    "distill": {
+      "type": "boolean",
+      "title": "Auto notes / 自動整理筆記",
+      "description": "Write your own requests and corrections into the memory folder with a count; past 3, ask Claude to put them into the project's CLAUDE.md / AGENTS.md. Each pass is one background request / 把你親口說的要求與糾正整理進記憶資料夾（記次數）；講 3 次以上請 Claude 放進專案的 CLAUDE.md／AGENTS.md。每次整理是一個背景請求",
+      "default": true
+    },
+    "distill_every": {
+      "type": "string",
+      "title": "Notes every N messages / 每幾則訊息整理一次",
+      "description": "Update notes after this many of your messages; also before handoff and on /distill / 你送出幾則訊息後自動整理；交接前與 /distill 也會整理",
+      "options": ["30", "50", "15"],
+      "default": "30"
+    },
+    "notes_model": {
+      "type": "string",
+      "title": "Notes model / 整理筆記用的模型",
+      "description": "Model for notes and guard drafts (effort low) / 整理筆記與起草守門用的模型（effort low）",
+      "options": ["sonnet", "haiku", "opus"],
+      "default": "sonnet"
     }
   }
 }
